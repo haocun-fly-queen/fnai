@@ -1,0 +1,16 @@
+name: Gitee CI
+
+# 如使用 Gitee 而非 GitHub，复制 ci.yml 内容并改为以下 trigger
+# Gitee Go 的 .gitee-ci.yml 不支持完整 GitHub Actions 语法，建议改用：
+#   1. Gitee 的 Pull Request 服务
+#   2. Drone CI / 自建 Jenkins
+#   3. 迁移到 GitHub（推荐）
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# 其余 jobs 与 ci.yml 保持一致
+# 注意：Gitee CI 的 actions runner 不完整，部分 setup-* 可能需要替换为 gitee-*
