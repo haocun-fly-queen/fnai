@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "fnai-backend"
+name = "app"
 version = "0.1.0"
 description = "FNAI / GEO content production platform backend"
 readme = "README.md"
