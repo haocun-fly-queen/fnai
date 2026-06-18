@@ -138,3 +138,9 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
 ]
+
+# ============================================
+# Hatch build configuration (FIX for CI)
+# ============================================
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
