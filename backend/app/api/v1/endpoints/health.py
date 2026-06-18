@@ -21,5 +21,5 @@ async def ready() -> dict[str, str]:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         return {"status": "ready"}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return {"status": "not_ready", "reason": str(exc)}
