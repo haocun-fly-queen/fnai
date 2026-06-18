@@ -92,6 +92,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "B011"]  # 测试中允许 assert、允许用 True/False
 "alembic/*" = ["E", "F", "I", "N"]  # 迁移文件宽松
+"app/core/config.py" = ["F401"]  # pydantic-settings 重导出
+"app/db/session.py" = ["F401"]  # 跨模块导出
+"app/main.py" = ["F401"]  # 应用入口导出
 
 [tool.ruff.format]
 quote-style = "double"
