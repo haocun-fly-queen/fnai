@@ -39,9 +39,20 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:
+        # 如果 detail 是个 dict，直接用它的字段；否则包成 message
+        # 修复：原来 str(exc.detail) 会把 dict 转成 "{'code':...}" 这种字符串
+        if isinstance(exc.detail, dict):
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={
+                    "code": exc.detail.get("code", f"http_{exc.status_code}"),
+                    "message": exc.detail.get("message", ""),
+                    "details": exc.detail.get("details", {}),
+                },
+            )
         return JSONResponse(
             status_code=exc.status_code,
-            content={"code": f"http_{exc.status_code}", "message": str(exc.detail)},
+            content={"code": f"http_{exc.status_code}", "message": str(exc.detail), "details": {}},
         )
 
     @app.exception_handler(RequestValidationError)

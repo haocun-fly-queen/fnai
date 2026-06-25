@@ -11,9 +11,11 @@ env:
   NODE_VERSION: "22"
 
 jobs:
-  # ========== 后端 ==========
+  # ===========================================
+  # 后端 Job
+  # ===========================================
   backend-lint:
-    name: Backend Lint
+    name: Backend Lint (Ruff)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -23,15 +25,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: pip install uv
-      - run: uv pip install --system ".[dev]"
-      - name: Ruff check
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Ruff lint
         run: ruff check .
       - name: Ruff format check
         run: ruff format --check .
 
   backend-typecheck:
-    name: Backend Type Check
+    name: Backend Type Check (mypy)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -41,14 +45,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: pip install uv
-      - run: uv pip install --system ".[dev]"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
       - name: mypy
-        run: mypy app || true
-        continue-on-error: true
+        # ⚠️ 不加 --strict，因为我们 pyproject 里 strict=false
+        # 也不加 --no-incremental，第一次跑用全量
+        run: mypy app
 
   backend-test:
-    name: Backend Test
+    name: Backend Test (pytest)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -77,20 +83,32 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://fnai:fnai@localhost:5432/fnai_test
       REDIS_URL: redis://localhost:6379/0
+      # ⚠️ 故意用 test secret（不是真的 key），保证 CI 不会调真实 OpenAI
+      OPENAI_API_KEY: sk-test-not-real-key
+      SECRET_KEY: test-secret-key-for-ci-only
+      ENVIRONMENT: test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: pip install uv
-      - run: uv pip install --system ".[dev]"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      # CI 数据库需要 pgvector 扩展；测试时建库脚本会跳过
+      - name: Create pgvector extension
+        run: |
+          PGPASSWORD=fnai psql -h localhost -U fnai -d fnai_test -c "CREATE EXTENSION IF NOT EXISTS vector"
       - name: Run tests
-        run: pytest || true
-        continue-on-error: true
+        # ⚠️ 暂时跳过：tests 目录还是空的
+        # 等有测试后再去掉 || true
+        run: pytest || echo "No tests yet, skipping"
 
-  # ========== 前端 ==========
+  # ===========================================
+  # 前端 Job
+  # ===========================================
   frontend-lint:
-    name: Frontend Lint
+    name: Frontend Lint (ESLint + Prettier)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -106,7 +124,7 @@ jobs:
         continue-on-error: true
 
   frontend-typecheck:
-    name: Frontend Type Check
+    name: Frontend Type Check (tsc)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -122,7 +140,7 @@ jobs:
         continue-on-error: true
 
   frontend-test:
-    name: Frontend Test
+    name: Frontend Test (vitest)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -134,11 +152,12 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - run: npm install
       - name: vitest
-        run: npm run test || true
-        continue-on-error: true
+        # ⚠️ 暂时跳过：vitest 配置还没写
+        # 等写完测试再去掉 || true
+        run: npm run test -- --passWithNoTests || echo "No tests yet, skipping"
 
   frontend-build:
-    name: Frontend Build
+    name: Frontend Build (vite)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -150,4 +169,5 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - run: npm install
       - name: vite build
+        # build 里已经包含 tsc --noEmit，所以这步能 catch 类型错
         run: npm run build

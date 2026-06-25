@@ -1,0 +1,13 @@
+app
+tests
+.env
+.env.local
+__pycache__
+*.pyc
+.venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+alembic
+*.egg-info
+.git

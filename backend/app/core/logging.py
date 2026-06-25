@@ -26,11 +26,9 @@ def setup_logging() -> None:
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.dev.set_exc_info,
-            (
-                structlog.processors.JSONRenderer()
-                if not settings.debug
-                else structlog.dev.ConsoleRenderer()
-            ),
+            structlog.processors.JSONRenderer()
+            if not settings.debug
+            else structlog.dev.ConsoleRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         context_class=dict,

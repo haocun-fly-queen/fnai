@@ -7,10 +7,15 @@ import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+# Import models so SQLAlchemy registers them on Base.metadata
+from app import models  # noqa: F401
 from app.api.v1 import api_router
 from app.core.config import settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import logger, setup_logging
+from app.db.base import Base
+from app.db.session import engine
+from app.services import storage
 
 
 @asynccontextmanager
@@ -20,6 +25,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     if settings.sentry_dsn:
         sentry_sdk.init(dsn=settings.sentry_dsn, environment=settings.environment)
     logger.info("app.startup", env=settings.environment, version=settings.app_version)
+
+    # 确保本地落盘根目录存在
+    storage.ensure_storage_root()
+
+    # Dev convenience: auto-create tables on startup. In production, use Alembic.
+    if settings.environment == "development":
+        try:
+            async with engine.begin() as conn:
+                # 先开 pgvector 扩展（如果没开）
+                from sqlalchemy import text
+
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("db.tables_created")
+        except Exception as exc:
+            logger.error("db.table_creation_failed", error=str(exc))
+
     yield
     logger.info("app.shutdown")
 

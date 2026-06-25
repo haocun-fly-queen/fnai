@@ -54,6 +54,29 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_embedding_model: str = "text-embedding-3-small"
     openai_chat_model: str = "gpt-4o-mini"
+    # embedding 向量维度（必须跟模型输出对得上）
+    # text-embedding-3-small = 1536
+    # text-embedding-3-large = 3072
+    # text-embedding-ada-002 = 1536
+    embedding_dim: int = 1536
+
+    # ----- Knowledge base / Upload -----
+    # 单文件上传上限（字节），默认 200MB
+    # 用 200MB 是为了兼顾企业 PDF 白皮书
+    max_upload_size_bytes: int = 200 * 1024 * 1024
+    # 文本分块配置
+    chunk_size: int = 500        # 每段 500 字
+    chunk_overlap: int = 50      # 段间重叠 50 字（避免切断语义）
+    # 支持的 MIME types
+    allowed_mime_types: list[str] = Field(
+        default_factory=lambda: [
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # .pptx
+            "text/plain",         # .txt
+            "text/markdown",      # .md
+        ]
+    )
 
     # ----- Storage -----
     s3_endpoint: str = "localhost:9000"
