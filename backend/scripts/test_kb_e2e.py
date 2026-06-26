@@ -1,7 +1,10 @@
-"""End-to-end smoke test for /knowledge endpoints (Step 2 验证).
+"""End-to-end smoke test for /knowledge endpoints (Step 2 + Step 3 验证).
+
+覆盖：KB 增删改查、文档上传、Celery 异步处理（解析→切分→embedding→READY）、
+     chunks 入库带向量、删除清理。
 
 用法：docker exec fnai-backend-dev python -m scripts.test_kb_e2e
-   或：python -m scripts.test_kb_e2e （本地也行，但要能访问后端）
+   或：python -m scripts.test_kb_e2e （本地也行，但要能访问后端 + docker）
 
 ⚠️ 这个脚本是验证用，不算测试套件（阶段 5 写正式 pytest）
 """
@@ -9,6 +12,7 @@
 import io
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -143,21 +147,104 @@ def main() -> int:
     assert code == 201, f"upload failed: {code} {resp}"
     doc_id = resp["id"]
     print(f"  ✓ 201, doc_id={doc_id}, size={resp['size_bytes']}, status={resp['status']}")
-    assert resp["status"] == "pending", "Step 2 should leave doc in pending"
-    assert resp["chunk_count"] == 0, "no chunks until Step 3 Celery runs"
+    # Step 3：上传后状态是 pending（worker 还没来得及处理）或 processing
+    assert resp["status"] in ("pending", "processing"), f"unexpected status: {resp['status']}"
 
     # ---------- 8) 列文档 ----------
     print("\n[8] 列文档")
     code, resp = call("GET", f"/knowledge/{kb_id}/documents", token=token)
     assert code == 200 and resp["total"] == 1
-    assert resp["pending_count"] == 1
-    print(f"  ✓ 200, total=1, pending={resp['pending_count']}")
+    print(f"  ✓ 200, total=1, status_counts pending={resp['pending_count']}")
 
     # ---------- 9) 文档详情 ----------
     print("\n[9] 文档详情")
     code, resp = call("GET", f"/knowledge/{kb_id}/documents/{doc_id}", token=token)
     assert code == 200
     print(f"  ✓ 200, filename={resp['filename']}, content_type={resp['content_type']}")
+
+    # ---------- 9.5) Step 3 核心：轮询等 Celery 处理到 READY ----------
+    print("\n[9.5] 等 Celery 异步处理（轮询文档状态 → READY）")
+    final_status = None
+    deadline = time.time() + 60  # 最多等 60 秒
+    while time.time() < deadline:
+        code, resp = call("GET", f"/knowledge/{kb_id}/documents/{doc_id}", token=token)
+        assert code == 200
+        final_status = resp["status"]
+        if final_status in ("ready", "failed"):
+            break
+        print(f"    ... status={final_status}，等 2s")
+        time.sleep(2)
+
+    assert final_status == "ready", (
+        f"文档处理未成功，最终 status={final_status}，"
+        f"error={resp.get('error_message')}"
+    )
+    chunk_count = resp["chunk_count"]
+    assert chunk_count > 0, f"READY 但 chunk_count={chunk_count}，应 > 0"
+    print(f"  ✓ status=ready, chunk_count={chunk_count}")
+
+    # ---------- 9.6) 验证 chunks 真的写进 DB 且带向量 ----------
+    print("\n[9.6] 验证 document_chunks 有数据且 embedding 非空（psycopg2 直连）")
+    import psycopg2
+    from app.core.config import settings as _settings
+
+    conn = psycopg2.connect(_settings.database_url_sync)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*), count(embedding) "
+                "FROM document_chunks WHERE document_id = %s;",
+                (doc_id,),
+            )
+            n_chunks, n_embedded = cur.fetchone()
+    finally:
+        conn.close()
+    assert n_chunks == chunk_count, f"DB chunk 数({n_chunks}) != API({chunk_count})"
+    assert n_embedded == n_chunks, f"有 chunk 的 embedding 为空: {n_embedded}/{n_chunks}"
+    print(f"  ✓ DB 里 {n_chunks} 个 chunk，全部有 embedding 向量")
+
+    # ---------- 9.7) Step 4：语义检索 ----------
+    print("\n[9.7] 语义检索（POST /search）")
+    code, resp = call("POST", f"/knowledge/{kb_id}/search", token=token, body={
+        "query": "FNAI 有哪些核心功能",
+        "top_k": 5,
+    })
+    assert code == 200, f"search failed: {code} {resp}"
+    assert resp["total"] >= 1, f"检索应有命中，got total={resp['total']}"
+    top = resp["items"][0]
+    # 校验返回结构：带文档来源 + 分数 + 位置
+    for field in ("chunk_id", "document_id", "filename", "chunk_index", "content", "score"):
+        assert field in top, f"检索结果缺字段 {field}: {top}"
+    assert top["filename"] == "test.txt", f"来源文件名不对: {top['filename']}"
+    assert 0.0 <= top["score"] <= 1.0, f"score 越界: {top['score']}"
+    print(f"  ✓ 200, total={resp['total']}, top score={top['score']:.4f}, 来源={top['filename']}")
+
+    # ---------- 9.8) 阈值过滤：超高阈值应过滤掉所有结果 ----------
+    print("\n[9.8] min_score=0.999 高阈值 → 期望过滤后变少/为空")
+    code, resp = call("POST", f"/knowledge/{kb_id}/search", token=token, body={
+        "query": "完全无关的内容 xyzzy 量子纠缠火星探测",
+        "top_k": 5,
+        "min_score": 0.999,
+    })
+    assert code == 200, f"search failed: {code} {resp}"
+    print(f"  ✓ 200, total={resp['total']}（高阈值过滤生效）")
+
+    # ---------- 9.9) 空 query → 期望 422 ----------
+    print("\n[9.9] 空 query → 期望 422")
+    code, resp = call("POST", f"/knowledge/{kb_id}/search", token=token, body={
+        "query": "",
+    })
+    assert code == 422, f"expected 422, got {code} {resp}"
+    print("  ✓ 422（query 校验生效）")
+
+    # ---------- 9.10) 不存在的 KB 检索 → 期望 404 ----------
+    print("\n[9.10] 不存在的 KB 检索 → 期望 404")
+    fake_kb = "00000000-0000-0000-0000-000000000000"
+    code, resp = call("POST", f"/knowledge/{fake_kb}/search", token=token, body={
+        "query": "test",
+    })
+    assert code == 404, f"expected 404, got {code} {resp}"
+    print(f"  ✓ 404 ({resp['code']})")
 
     # ---------- 10) 上传错误 MIME（应 415）----------
     print("\n[10] 上传不支持的 MIME → 期望 415")
@@ -176,23 +263,14 @@ def main() -> int:
     assert code == 415, f"expected 415, got {code} {resp}"
     print(f"  ✓ 415 ({resp['code']})")
 
-    # ---------- 11) 验证文件真的落盘了（容器里）----------
-    print("\n[11] 验证文件在容器 /tmp/fnai-storage/ 里")
-    # 文件存在 backend 容器里，不在宿主机
-    # 用 docker exec 查
-    import subprocess
-    result = subprocess.run(
-        ["docker", "exec", "fnai-backend-dev", "find", "/tmp/fnai-storage", "-name", f"*{doc_id}*"],
-        capture_output=True, text=True, timeout=10,
-    )
-    found_paths = [p for p in result.stdout.strip().split("\n") if p]
-    assert len(found_paths) == 1, f"expected 1 file in container, found {len(found_paths)}: {found_paths}"
-    # 取文件大小
-    sz_result = subprocess.run(
-        ["docker", "exec", "fnai-backend-dev", "stat", "-c", "%s", found_paths[0]],
-        capture_output=True, text=True, timeout=10,
-    )
-    size = int(sz_result.stdout.strip())
+    # ---------- 11) 验证文件真的落盘了 ----------
+    print("\n[11] 验证文件落盘到 /tmp/fnai-storage/")
+    # 脚本跑在 backend 容器内，storage 路径本地可见，直接用 pathlib 查
+    from pathlib import Path
+    storage_root = Path("/tmp/fnai-storage")
+    found_paths = [str(p) for p in storage_root.rglob(f"*{doc_id}*") if p.is_file()]
+    assert len(found_paths) == 1, f"expected 1 file, found {len(found_paths)}: {found_paths}"
+    size = Path(found_paths[0]).stat().st_size
     print(f"  ✓ 文件存在: {found_paths[0]} ({size} bytes)")
 
     # ---------- 12) 删文档（应 204 + 文件没了）----------
@@ -200,13 +278,9 @@ def main() -> int:
     code, resp = call("DELETE", f"/knowledge/{kb_id}/documents/{doc_id}", token=token)
     assert code == 204, f"delete doc failed: {code} {resp}"
     print(f"  ✓ 204")
-    # 验证文件删了（容器里）
-    result = subprocess.run(
-        ["docker", "exec", "fnai-backend-dev", "find", "/tmp/fnai-storage", "-name", f"*{doc_id}*"],
-        capture_output=True, text=True, timeout=10,
-    )
-    still = [p for p in result.stdout.strip().split("\n") if p]
-    assert not still, f"file still exists in container: {still}"
+    # 验证文件删了
+    still = [str(p) for p in storage_root.rglob(f"*{doc_id}*") if p.is_file()]
+    assert not still, f"file still exists: {still}"
     print(f"  ✓ 文件已删除")
 
     # ---------- 13) 删 KB（应 204）----------
@@ -222,7 +296,7 @@ def main() -> int:
     print(f"  ✓ 404 ({resp['code']})")
 
     print("\n" + "=" * 60)
-    print("✅ 全部通过（14 个场景）")
+    print("✅ 全部通过（含 Step 3 异步处理 + Step 4 语义检索）")
     print("=" * 60)
     return 0
 

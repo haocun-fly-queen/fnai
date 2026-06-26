@@ -7,6 +7,25 @@ networks:
   fnai-dev_default:
     external: true
 
+# 共享环境变量（backend 和 celery-worker 都用同一套）
+# YAML 锚点 &backend-env 定义一次，下面用 *backend-env 引用，避免两份写不一致。
+# ⚠️ CELERY_* 必须显式指向 fnai-redis：默认值是 localhost，在容器里连不上。
+x-backend-env: &backend-env
+  ENVIRONMENT: development
+  DEBUG: "true"
+  DATABASE_URL: postgresql+asyncpg://fnai:fnai@fnai-postgres:5432/fnai_dev
+  DATABASE_URL_SYNC: postgresql://fnai:fnai@fnai-postgres:5432/fnai_dev
+  REDIS_URL: redis://fnai-redis:6379/0
+  CELERY_BROKER_URL: redis://fnai-redis:6379/1
+  CELERY_RESULT_BACKEND: redis://fnai-redis:6379/2
+  CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
+  JWT_SECRET: dev-only-not-for-production-please-change-me
+  OPENAI_API_KEY: "sk-ec0b4c97639f4ffabca8f4d03461ba01"
+  OPENAI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  OPENAI_EMBEDDING_MODEL: "text-embedding-v2"
+  OPENAI_CHAT_MODEL: "qwen-plus"
+  SENTRY_DSN: ""
+
 services:
   backend:
     build:
@@ -15,19 +34,13 @@ services:
     container_name: fnai-backend-dev
     restart: unless-stopped
     environment:
-      ENVIRONMENT: development
-      DEBUG: "true"
-      DATABASE_URL: postgresql+asyncpg://fnai:fnai@fnai-postgres:5432/fnai_dev
-      DATABASE_URL_SYNC: postgresql://fnai:fnai@fnai-postgres:5432/fnai_dev
-      REDIS_URL: redis://fnai-redis:6379/0
-      CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
-      JWT_SECRET: dev-only-not-for-production-please-change-me
-      OPENAI_API_KEY: ""
-      SENTRY_DSN: ""
+      <<: *backend-env
     ports:
       - "8000:8000"
     volumes:
       - ../backend/app:/app/app:ro
+      # E2E 验证脚本（docker exec ... python -m scripts.test_kb_e2e 用）
+      - ../backend/scripts:/app/scripts:ro
       # 把容器里 /tmp/fnai-storage/ 挂到 E 盘的 .workbuddy/storage/
       # 原因：上传的文件原本落在 Docker 的 WSL 虚拟磁盘 (C 盘)，
       #       容易占满 C 盘且拿不出来。挂到 E 盘既安全又可访问。
@@ -37,6 +50,30 @@ services:
     command: >
       sh -c "
         uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  # Celery worker：消费 process_document 任务（解析→切分→embedding→写 chunks）
+  celery-worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: fnai-celery-dev
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    volumes:
+      # 代码热更：改了 tasks/services 重启容器即可生效
+      - ../backend/app:/app/app:ro
+      # ⚠️ 必须和 backend 挂同一个 storage，worker 才能读到上传的原始文件
+      - /e/workingbuddy/2026-06-18-10-20-53/.workbuddy/storage:/tmp/fnai-storage
+    networks:
+      - fnai-dev_default
+    depends_on:
+      - backend
+    # --concurrency=2：开发期 2 个并发够用；--loglevel=info 方便看处理日志
+    command: >
+      sh -c "
+        celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
       "
 
   frontend:
