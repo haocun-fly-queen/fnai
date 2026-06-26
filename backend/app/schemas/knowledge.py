@@ -129,6 +129,69 @@ class DocumentListResponse(BaseModel):
 
 
 # ============================================================
+# Search（语义检索，Step 4）
+# ============================================================
+
+
+class SearchRequest(BaseModel):
+    """POST /knowledge/{kb_id}/search 的请求体。
+
+    把 query 向量化后，在该 KB 的 chunk 里找语义最相近的若干条。
+    """
+
+    # 查询文本（用户问的问题 / 要检索的关键词）
+    query: str = Field(
+        min_length=1,
+        max_length=1000,
+        description="检索查询文本",
+        examples=["FNAI 有哪些核心功能"],
+    )
+
+    # 返回前 K 条最相似的（默认 5，给 RAG 喂上下文够用）
+    top_k: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="返回最相似的前 K 条",
+    )
+
+    # 相似度阈值（可选）：只返回 score >= min_score 的结果，过滤勉强沾边的
+    # 余弦相似度范围 [-1, 1]，实际文本通常落在 [0, 1]
+    min_score: float | None = Field(
+        default=None,
+        ge=-1.0,
+        le=1.0,
+        description="相似度阈值（可选）；不传则不过滤",
+        examples=[0.5],
+    )
+
+
+class SearchResultItem(BaseModel):
+    """单条检索命中（一个 chunk + 它的来源文档信息 + 相似度分数）。"""
+
+    chunk_id: UUID
+    # 来源文档（前端展示"引用自 xx.pdf"用）
+    document_id: UUID
+    filename: str
+    # chunk 在文档里的序号 + 字符位置（前端可跳回原文定位高亮）
+    chunk_index: int
+    char_start: int
+    char_end: int
+    # chunk 正文
+    content: str
+    # 余弦相似度，1 = 完全一致，越大越相似（= 1 - cosine_distance）
+    score: float
+
+
+class SearchResponse(BaseModel):
+    """POST /knowledge/{kb_id}/search 的响应。"""
+
+    query: str
+    items: list[SearchResultItem]
+    total: int
+
+
+# ============================================================
 # 工具函数
 # ============================================================
 
