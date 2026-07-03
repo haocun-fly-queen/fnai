@@ -16,6 +16,7 @@ from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 if TYPE_CHECKING:
     from app.models.invitation import Invitation
     from app.models.membership import TenantMember
+    from app.models.publish_target import PublishTarget
 
 
 class TenantPlan(str, PyEnum):
@@ -60,6 +61,12 @@ class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # 这里不加 cascade，因为 Invitation 有自己的 FK CASCADE
     invitations: Mapped[list["Invitation"]] = relationship(
         back_populates="tenant",
+    )
+
+    # 发布目标：租户被删时一起删
+    publish_targets: Mapped[list["PublishTarget"]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
     )
 
     def __repr__(self) -> str:

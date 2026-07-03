@@ -27,10 +27,17 @@ from app.db.base import Base
 # ⚠️ 关键：必须显式 import 所有 model，Base.metadata 才能发现它们
 # 这一行是"激活"所有表定义
 from app.models import (  # noqa: F401
+    Article,
+    ArticleVersion,
     Document,
     DocumentChunk,
+    GenerationTask,
     Invitation,
     KnowledgeBase,
+    ModelCallLog,
+    PromptTemplate,
+    PublishLog,
+    PublishTarget,
     Tenant,
     TenantMember,
     User,

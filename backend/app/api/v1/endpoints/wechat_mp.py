@@ -1,0 +1,491 @@
+"""微信公众号 HTTP 端点（阶段 5 — 微信公众号对接）。
+
+概念：微信公众号发布相关的 API 端点。
+模块：api/v1/endpoints/wechat_mp.py
+作用：提供微信公众号发布、状态查询、配置管理等接口
+怎么写：
+    - 端点"瘦"：接参 → 调 service → 翻译错误 → HTTP 响应
+    - 复用现有的认证和权限机制
+    - 完整的错误处理和日志记录
+
+端点列表：
+    POST   /articles/{id}/publish-wechat      发布文章到微信公众号
+    GET    /publish-wechat/status/{publish_id} 查询发布状态
+    POST   /wechat-configs                     创建微信公众号配置
+    GET    /wechat-configs                     列出微信公众号配置
+    PUT    /wechat-configs/{id}                更新微信公众号配置
+    DELETE /wechat-configs/{id}                删除微信公众号配置
+"""
+
+import logging
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.v1.deps import get_active_tenant_id, get_current_user, get_db, require_role
+from app.models.article import Article
+from app.models.membership import Role, TenantMember
+from app.models.publish_log import PublishLog, PublishStatus
+from app.models.publish_target import PublishTarget, PublishTargetType
+from app.models.user import User
+from app.schemas.wechat import (
+    WechatConfigCreate,
+    WechatConfigResponse,
+    WechatConfigUpdate,
+    WechatPublishRequest,
+    WechatPublishResponse,
+    WechatPublishStatusResponse,
+)
+from app.services.wechat_mp import WechatMpClient, WechatMpError
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["wechat"])
+
+
+# ============================================================
+# 发布端点
+# ============================================================
+
+
+@router.post(
+    "/articles/{article_id}/publish-wechat",
+    response_model=WechatPublishResponse,
+    summary="发布文章到微信公众号",
+)
+async def publish_to_wechat(
+    article_id: UUID,
+    request: WechatPublishRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    membership: Annotated[TenantMember, Depends(require_role(Role.MEMBER))],
+) -> WechatPublishResponse:
+    """发布文章到微信公众号。
+
+    流程：
+    1. 验证文章存在且属于当前租户
+    2. 获取微信公众号配置
+    3. 调用微信 API 发布
+    4. 记录发布日志
+    5. 如果失败，尝试降级处理
+    """
+    tenant_id = membership.tenant_id
+
+    # 1. 查询文章
+    stmt = select(Article).where(
+        Article.id == article_id,
+        Article.tenant_id == tenant_id,
+    )
+    result = await db.execute(stmt)
+    article = result.scalar_one_or_none()
+
+    if not article:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文章不存在",
+        )
+
+    if not article.content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="文章内容为空，无法发布",
+        )
+
+    # 2. 获取微信公众号配置
+    wechat_config = await _get_wechat_config(db, tenant_id)
+    if not wechat_config:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="未配置微信公众号，请先在发布目标管理页面配置",
+        )
+
+    # 3. 创建发布日志（初始状态）
+    publish_log = PublishLog(
+        article_id=article_id,
+        target_id=wechat_config.id,
+        status=PublishStatus.PENDING,
+        created_by=current_user.id,
+    )
+    db.add(publish_log)
+    await db.commit()
+    await db.refresh(publish_log)
+
+    # 4. 调用微信 API 发布
+    try:
+        client = WechatMpClient(
+            db=db,
+            app_id=wechat_config.config["app_id"],
+            app_secret=wechat_config.config["app_secret"],
+        )
+
+        # 使用请求中的作者，或配置中的默认作者
+        author = (
+            request.author
+            or wechat_config.config.get("author", "")
+            or "FNAI"
+        )
+
+        # 使用请求中的摘要，或文章的 summary
+        digest = request.digest or article.summary or ""
+
+        result = await client.publish_article(
+            title=article.title,
+            content=article.content,
+            author=author,
+            digest=digest,
+            thumb_media_id=request.thumb_media_id,
+            need_open_comment=request.need_open_comment,
+            only_fans_can_comment=request.only_fans_can_comment,
+        )
+
+        # 更新发布日志为"已提交"（微信发布是异步的，真正成功要轮询状态）
+        publish_log.status = PublishStatus.PENDING  # 等待微信审核/发布
+        publish_log.remote_id = result["publish_id"]
+        await db.commit()
+
+        logger.info(
+            f"Article submitted to WeChat: article_id={article_id}, "
+            f"publish_id={result['publish_id']}, status=pending"
+        )
+
+        return WechatPublishResponse(
+            success=True,
+            message="已提交发布任务，请稍后查询状态（微信审核中）",
+            publish_id=result["publish_id"],
+            draft_media_id=result["draft_media_id"],
+        )
+
+    except WechatMpError as e:
+        logger.error(
+            f"WeChat publish failed: article_id={article_id}, "
+            f"error_code={e.code}, error_message={e.message}"
+        )
+
+        # 更新发布日志为失败
+        publish_log.status = PublishStatus.FAILED
+        publish_log.error_message = e.message
+        await db.commit()
+
+        # 尝试降级处理
+        fallback_result = await _handle_publish_fallback(
+            article=article,
+            error=e,
+            db=db,
+        )
+
+        return fallback_result
+
+
+@router.get(
+    "/publish-wechat/status/{publish_id}",
+    response_model=WechatPublishStatusResponse,
+    summary="查询微信发布状态",
+)
+async def get_publish_status(
+    publish_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    membership: Annotated[TenantMember, Depends(require_role(Role.VIEWER))],
+) -> WechatPublishStatusResponse:
+    """查询微信发布状态。
+
+    微信发布是异步的，提交后需要轮询状态。
+    建议客户端每隔 2-3 秒查询一次。
+    """
+    tenant_id = membership.tenant_id
+
+    # 获取微信公众号配置
+    wechat_config = await _get_wechat_config(db, tenant_id)
+    if not wechat_config:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="未配置微信公众号",
+        )
+
+    try:
+        client = WechatMpClient(
+            db=db,
+            app_id=wechat_config.config["app_id"],
+            app_secret=wechat_config.config["app_secret"],
+        )
+
+        status_data = await client.get_publish_status(publish_id)
+
+        return WechatPublishStatusResponse(
+            publish_id=publish_id,
+            publish_status=status_data.get("publish_status", 1),
+            article_id=status_data.get("article_id"),
+            article_url=status_data.get("article_url"),
+            fail_reason=status_data.get("fail_reason"),
+        )
+
+    except WechatMpError as e:
+        logger.error(f"Query publish status failed: {e.message}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=e.message,
+        )
+
+
+# ============================================================
+# 配置管理端点
+# ============================================================
+
+
+@router.post(
+    "/wechat-configs",
+    response_model=WechatConfigResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="创建微信公众号配置",
+)
+async def create_wechat_config(
+    request: WechatConfigCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    membership: Annotated[TenantMember, Depends(require_role(Role.ADMIN))],
+) -> WechatConfigResponse:
+    """创建微信公众号配置。
+
+    每个租户只能有一个微信公众号配置。
+    """
+    tenant_id = membership.tenant_id
+
+    # 检查是否已存在
+    existing = await _get_wechat_config(db, tenant_id)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="已存在微信公众号配置，请先删除后再创建",
+        )
+
+    # 创建配置
+    config = PublishTarget(
+        tenant_id=tenant_id,
+        name=request.name,
+        type=PublishTargetType.WECHAT_MP,  # 微信公众号专用类型
+        config={
+            "app_id": request.app_id,
+            "app_secret": request.app_secret,
+            "author": request.author or "",
+            "thumb_media_id": request.thumb_media_id or "",
+            "platform": "wechat_mp",  # 保留标识，向后兼容
+        },
+        is_active=True,
+    )
+    db.add(config)
+    await db.commit()
+    await db.refresh(config)
+
+    return WechatConfigResponse(
+        id=config.id,
+        name=config.name,
+        app_id=request.app_id,
+        author=request.author,
+        is_active=config.is_active,
+        created_at=config.created_at.isoformat(),
+        updated_at=config.updated_at.isoformat(),
+    )
+
+
+@router.get(
+    "/wechat-configs",
+    response_model=list[WechatConfigResponse],
+    summary="列出微信公众号配置",
+)
+async def list_wechat_configs(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    membership: Annotated[TenantMember, Depends(require_role(Role.VIEWER))],
+) -> list[WechatConfigResponse]:
+    """列出当前租户的微信公众号配置。"""
+    tenant_id = membership.tenant_id
+
+    stmt = select(PublishTarget).where(
+        PublishTarget.tenant_id == tenant_id,
+        PublishTarget.type == PublishTargetType.WECHAT_MP,
+    )
+    result = await db.execute(stmt)
+    configs = list(result.scalars().all())
+
+    return [
+        WechatConfigResponse(
+            id=c.id,
+            name=c.name,
+            app_id=c.config.get("app_id", ""),
+            author=c.config.get("author"),
+            is_active=c.is_active,
+            created_at=c.created_at.isoformat(),
+            updated_at=c.updated_at.isoformat(),
+        )
+        for c in configs
+    ]
+
+
+@router.put(
+    "/wechat-configs/{config_id}",
+    response_model=WechatConfigResponse,
+    summary="更新微信公众号配置",
+)
+async def update_wechat_config(
+    config_id: UUID,
+    request: WechatConfigUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    membership: Annotated[TenantMember, Depends(require_role(Role.ADMIN))],
+) -> WechatConfigResponse:
+    """更新微信公众号配置。"""
+    tenant_id = membership.tenant_id
+
+    stmt = select(PublishTarget).where(
+        PublishTarget.id == config_id,
+        PublishTarget.tenant_id == tenant_id,
+        PublishTarget.type == PublishTargetType.WECHAT_MP,
+    )
+    result = await db.execute(stmt)
+    config = result.scalar_one_or_none()
+
+    if not config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="微信公众号配置不存在",
+        )
+
+    # 更新字段
+    # ⚠️ JSONB 需要构造新 dict 再整体赋值，否则原地修改 SQLAlchemy 检测不到，不会落库
+    if request.name is not None:
+        config.name = request.name
+
+    new_config = dict(config.config)  # 复制一份，避免原地修改
+    config_changed = False
+    if request.app_secret is not None:
+        new_config["app_secret"] = request.app_secret
+        config_changed = True
+    if request.author is not None:
+        new_config["author"] = request.author
+        config_changed = True
+    if request.thumb_media_id is not None:
+        new_config["thumb_media_id"] = request.thumb_media_id
+        config_changed = True
+    if config_changed:
+        config.config = new_config  # 整体赋值，触发 SQLAlchemy 变更检测
+
+    await db.commit()
+    await db.refresh(config)
+
+    return WechatConfigResponse(
+        id=config.id,
+        name=config.name,
+        app_id=config.config.get("app_id", ""),
+        author=config.config.get("author"),
+        is_active=config.is_active,
+        created_at=config.created_at.isoformat(),
+        updated_at=config.updated_at.isoformat(),
+    )
+
+
+@router.delete(
+    "/wechat-configs/{config_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="删除微信公众号配置",
+)
+async def delete_wechat_config(
+    config_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    membership: Annotated[TenantMember, Depends(require_role(Role.ADMIN))],
+) -> None:
+    """删除微信公众号配置。"""
+    tenant_id = membership.tenant_id
+
+    stmt = select(PublishTarget).where(
+        PublishTarget.id == config_id,
+        PublishTarget.tenant_id == tenant_id,
+        PublishTarget.type == PublishTargetType.WECHAT_MP,
+    )
+    result = await db.execute(stmt)
+    config = result.scalar_one_or_none()
+
+    if not config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="微信公众号配置不存在",
+        )
+
+    await db.delete(config)
+    await db.commit()
+
+
+# ============================================================
+# 内部辅助函数
+# ============================================================
+
+
+async def _get_wechat_config(
+    db: AsyncSession, tenant_id: UUID
+) -> PublishTarget | None:
+    """获取微信公众号配置。"""
+    stmt = select(PublishTarget).where(
+        PublishTarget.tenant_id == tenant_id,
+        PublishTarget.is_active == True,  # noqa: E712
+        PublishTarget.type == PublishTargetType.WECHAT_MP,
+    )
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def _handle_publish_fallback(
+    article: Article,
+    error: WechatMpError,
+    db: AsyncSession,
+) -> WechatPublishResponse:
+    """处理发布失败的降级逻辑。"""
+
+    # 1. 内容违规 — 不降级，直接返回错误
+    if error.wx_errcode == 45010:
+        return WechatPublishResponse(
+            success=False,
+            message=f"文章内容不符合微信公众号规范: {error.message}",
+            fallback=False,
+        )
+
+    # 2. Token 失效 — 提示重新配置
+    if error.wx_errcode in (40001, 40002, 40013):
+        return WechatPublishResponse(
+            success=False,
+            message="微信公众号配置无效，请检查 AppID 和 AppSecret",
+            fallback=False,
+        )
+
+    # 3. 配额超限 — 提示稍后重试
+    if error.wx_errcode == 45009:
+        return WechatPublishResponse(
+            success=False,
+            message="微信公众号调用频率超限，请稍后重试",
+            fallback=True,
+            fallback_strategy="queue_retry",
+        )
+
+    # 4. 其他错误 — 降级为手动复制
+    formatted_content = _format_for_wechat(article)
+
+    return WechatPublishResponse(
+        success=False,
+        message=f"自动发布失败: {error.message}",
+        fallback=True,
+        fallback_strategy="manual_copy",
+        copy_content=formatted_content,
+    )
+
+
+def _format_for_wechat(article: Article) -> str:
+    """格式化内容为微信公众号可复制格式。"""
+    content = f"""【标题】{article.title}
+
+【摘要】{article.summary or '无'}
+
+【正文】
+{article.content}
+
+---
+以上内容由 FNAI 自动生成，请复制到微信公众号后台发布。
+"""
+    return content

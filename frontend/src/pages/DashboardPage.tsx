@@ -46,12 +46,14 @@ export function DashboardPage(): JSX.Element {
 
   // 组件挂载时拉一次最新租户列表
   useEffect(() => {
-    let cancelled = false;
+    const abortController = new AbortController();
 
     async function load(): Promise<void> {
       try {
+        // TODO: listMyTenants() 暂不支持 AbortSignal，需要在 lib/api.ts 所有方法加 signal 参数
+        // 当前 abortController.abort() 只能阻止 setState，实际 HTTP 请求仍在飞
         const data = await listMyTenants();
-        if (cancelled) return;
+        if (abortController.signal.aborted) return;
 
         // 把后端返回的 TenantWithMembership 压成页面要用的形状
         setTenants(
@@ -64,7 +66,7 @@ export function DashboardPage(): JSX.Element {
           })),
         );
       } catch (err) {
-        if (cancelled) return;
+        if (abortController.signal.aborted) return;
         // ⚠️ 401 已经被 axios 拦截器处理（自动跳登录），所以这里
         // 看到的都是非 401 错误（网络错、500 等）
         console.error('Failed to load tenants', err);
@@ -73,7 +75,7 @@ export function DashboardPage(): JSX.Element {
 
     load();
     return () => {
-      cancelled = true;
+      abortController.abort();
     };
   }, []);
 
@@ -175,6 +177,18 @@ export function DashboardPage(): JSX.Element {
               className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800"
             >
               团队管理 →
+            </button>
+            <button
+              onClick={() => navigate('/knowledge')}
+              className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800"
+            >
+              知识库 →
+            </button>
+            <button
+              onClick={() => navigate('/articles')}
+              className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800"
+            >
+              文章管理 →
             </button>
             <button
               onClick={() => navigate('/test-panel')}

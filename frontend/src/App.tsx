@@ -5,6 +5,11 @@ import { DashboardPage } from '@/pages/DashboardPage';
 import { TeamPage } from '@/pages/TeamPage';
 import { AcceptInvitationPage } from '@/pages/AcceptInvitationPage';
 import { TestPanelPage } from '@/pages/TestPanelPage';
+import { KnowledgePage } from '@/pages/KnowledgePage';
+import { ArticlesPage } from '@/pages/ArticlesPage';
+import { ArticleEditorPage } from '@/pages/ArticleEditorPage';
+import { PublishTargetsPage } from '@/pages/PublishTargetsPage';
+import { WechatConfigPage } from '@/pages/WechatConfigPage';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { useAuthStore } from '@/stores/auth';
 
@@ -50,6 +55,46 @@ export function App(): JSX.Element {
         element={
           <ProtectedRoute>
             <TestPanelPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/knowledge"
+        element={
+          <ProtectedRoute>
+            <KnowledgePage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/articles"
+        element={
+          <ProtectedRoute>
+            <ArticlesPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/articles/:id"
+        element={
+          <ProtectedRoute>
+            <ArticleEditorPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/publish-targets"
+        element={
+          <ProtectedRoute>
+            <PublishTargetsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/wechat-config"
+        element={
+          <ProtectedRoute>
+            <WechatConfigPage />
           </ProtectedRoute>
         }
       />

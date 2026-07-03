@@ -1,0 +1,315 @@
+"""发布端点（阶段 5）—— 发布目标管理 + 文章发布。
+
+发布目标 CRUD：
+    POST   /publish-targets          创建发布目标
+    GET    /publish-targets          列出发布目标
+    GET    /publish-targets/{id}     查看单个
+    PUT    /publish-targets/{id}     更新
+    DELETE /publish-targets/{id}     删除
+
+文章发布：
+    POST   /articles/{id}/publish    发布到指定目标
+    GET    /articles/{id}/publish-logs  查看发布历史
+"""
+
+import logging
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.v1.deps import get_active_tenant_id, get_current_user, get_db
+from app.models.article import Article
+from app.models.publish_log import PublishLog, PublishStatus
+from app.models.publish_target import PublishTarget, PublishTargetType
+from app.models.user import User
+from app.schemas.publish import (
+    PublishLogResponse,
+    PublishRequest,
+    PublishResponse,
+    PublishTargetCreate,
+    PublishTargetResponse,
+    PublishTargetUpdate,
+)
+from app.services.wordpress import WordPressClient
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# 发布目标 CRUD
+# ============================================================
+
+
+@router.post("/publish-targets", response_model=PublishTargetResponse, status_code=201)
+async def create_publish_target(
+    data: PublishTargetCreate,
+    db: AsyncSession = Depends(get_db),
+    tenant_id: UUID = Depends(get_active_tenant_id),
+) -> PublishTarget:
+    """创建发布目标（WordPress / Webhook）。"""
+    target = PublishTarget(
+        tenant_id=tenant_id,
+        name=data.name,
+        type=data.type,
+        config=data.config,
+        is_active=data.is_active,
+    )
+    db.add(target)
+    await db.commit()
+    await db.refresh(target)
+    return target
+
+
+@router.get("/publish-targets", response_model=list[PublishTargetResponse])
+async def list_publish_targets(
+    db: AsyncSession = Depends(get_db),
+    tenant_id: UUID = Depends(get_active_tenant_id),
+    active_only: bool = True,
+) -> list[PublishTarget]:
+    """列出发布目标（租户隔离）。
+
+    注意：微信公众号（wechat_mp）有独立的发布入口和配置页，
+    这里只返回 WordPress / Webhook 目标，避免污染通用发布下拉框。
+    """
+    stmt = select(PublishTarget).where(
+        PublishTarget.tenant_id == tenant_id,
+        PublishTarget.type != PublishTargetType.WECHAT_MP,
+    )
+    if active_only:
+        stmt = stmt.where(PublishTarget.is_active == True)  # noqa: E712
+    stmt = stmt.order_by(PublishTarget.created_at.desc())
+
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+@router.get("/publish-targets/{target_id}", response_model=PublishTargetResponse)
+async def get_publish_target(
+    target_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    tenant_id: UUID = Depends(get_active_tenant_id),
+) -> PublishTarget:
+    """查看单个发布目标。"""
+    stmt = select(PublishTarget).where(
+        PublishTarget.id == target_id,
+        PublishTarget.tenant_id == tenant_id,
+    )
+    result = await db.execute(stmt)
+    target = result.scalar_one_or_none()
+
+    if not target:
+        raise HTTPException(status_code=404, detail="发布目标不存在")
+
+    return target
+
+
+@router.put("/publish-targets/{target_id}", response_model=PublishTargetResponse)
+async def update_publish_target(
+    target_id: UUID,
+    data: PublishTargetUpdate,
+    db: AsyncSession = Depends(get_db),
+    tenant_id: UUID = Depends(get_active_tenant_id),
+) -> PublishTarget:
+    """更新发布目标。"""
+    stmt = select(PublishTarget).where(
+        PublishTarget.id == target_id,
+        PublishTarget.tenant_id == tenant_id,
+    )
+    result = await db.execute(stmt)
+    target = result.scalar_one_or_none()
+
+    if not target:
+        raise HTTPException(status_code=404, detail="发布目标不存在")
+
+    # 更新字段
+    if data.name is not None:
+        target.name = data.name
+    if data.config is not None:
+        target.config = data.config
+    if data.is_active is not None:
+        target.is_active = data.is_active
+
+    await db.commit()
+    await db.refresh(target)
+    return target
+
+
+@router.delete("/publish-targets/{target_id}", status_code=204)
+async def delete_publish_target(
+    target_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    tenant_id: UUID = Depends(get_active_tenant_id),
+) -> None:
+    """删除发布目标（级联删除发布日志）。"""
+    stmt = select(PublishTarget).where(
+        PublishTarget.id == target_id,
+        PublishTarget.tenant_id == tenant_id,
+    )
+    result = await db.execute(stmt)
+    target = result.scalar_one_or_none()
+
+    if not target:
+        raise HTTPException(status_code=404, detail="发布目标不存在")
+
+    await db.delete(target)
+    await db.commit()
+
+
+# ============================================================
+# 文章发布
+# ============================================================
+
+
+@router.post("/articles/{article_id}/publish", response_model=PublishResponse)
+async def publish_article(
+    article_id: UUID,
+    data: PublishRequest,
+    db: AsyncSession = Depends(get_db),
+    tenant_id: UUID = Depends(get_active_tenant_id),
+    current_user: User = Depends(get_current_user),
+) -> PublishResponse:
+    """发布文章到指定目标（WordPress / Webhook）。"""
+    # 1. 查询文章
+    stmt = select(Article).where(Article.id == article_id, Article.tenant_id == tenant_id)
+    result = await db.execute(stmt)
+    article = result.scalar_one_or_none()
+
+    if not article:
+        raise HTTPException(status_code=404, detail="文章不存在")
+
+    if not article.content:
+        raise HTTPException(status_code=400, detail="文章内容为空，无法发布")
+
+    # 2. 查询发布目标
+    stmt = select(PublishTarget).where(
+        PublishTarget.id == data.target_id,
+        PublishTarget.tenant_id == tenant_id,
+    )
+    result = await db.execute(stmt)
+    target = result.scalar_one_or_none()
+
+    if not target:
+        raise HTTPException(status_code=404, detail="发布目标不存在")
+
+    if not target.is_active:
+        raise HTTPException(status_code=400, detail="发布目标已禁用")
+
+    # 3. 创建发布日志（初始状态 pending）
+    log = PublishLog(
+        article_id=article_id,
+        target_id=data.target_id,
+        status=PublishStatus.PENDING,
+        created_by=current_user.id,
+    )
+    db.add(log)
+    await db.commit()
+    await db.refresh(log)
+
+    # 4. 根据目标类型调用相应的发布逻辑
+    try:
+        if target.type == PublishTargetType.WORDPRESS:
+            remote_id = await _publish_to_wordpress(article, target, data.status)
+        elif target.type == PublishTargetType.WEBHOOK:
+            remote_id = await _publish_to_webhook(article, target)
+        else:
+            raise ValueError(f"不支持的发布目标类型: {target.type}")
+
+        # 5. 更新日志为成功
+        log.status = PublishStatus.SUCCESS
+        log.remote_id = str(remote_id)
+        await db.commit()
+
+        return PublishResponse(
+            success=True,
+            message="发布成功",
+            remote_id=str(remote_id),
+            log_id=log.id,
+        )
+
+    except Exception as e:
+        # 6. 发布失败，记录错误
+        logger.error(f"发布失败: {e}", exc_info=True)
+        log.status = PublishStatus.FAILED
+        log.error_message = str(e)
+        await db.commit()
+
+        return PublishResponse(
+            success=False,
+            message=f"发布失败: {str(e)}",
+            log_id=log.id,
+        )
+
+
+async def _publish_to_wordpress(article: Article, target: PublishTarget, status: str) -> int:
+    """发布到 WordPress。"""
+    config = target.config
+    required_keys = ["site_url", "username", "app_password"]
+    missing = [k for k in required_keys if k not in config]
+    if missing:
+        raise ValueError(f"WordPress 配置缺少字段: {', '.join(missing)}")
+
+    client = WordPressClient(
+        site_url=config["site_url"],
+        username=config["username"],
+        app_password=config["app_password"],
+    )
+
+    # TODO: 如果 remote_id 已存在，应该调用 update_post 而不是 create_post
+    # 这里简化处理：每次都创建新文章
+    post_id = await client.create_post(
+        title=article.title or "未命名文章",
+        content=article.content,
+        status=status,
+    )
+    return post_id
+
+
+async def _publish_to_webhook(article: Article, target: PublishTarget) -> str:
+    """发布到自定义 Webhook。"""
+    import httpx
+
+    config = target.config
+    webhook_url = config.get("webhook_url")
+    if not webhook_url:
+        raise ValueError("Webhook 配置缺少 webhook_url")
+
+    headers = config.get("headers", {})
+    payload = {
+        "title": article.title,
+        "content": article.content,
+        "summary": article.summary,
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(webhook_url, json=payload, headers=headers)
+        response.raise_for_status()
+        # 返回响应体作为 remote_id（简化处理）
+        return response.text[:200]
+
+
+@router.get("/articles/{article_id}/publish-logs", response_model=list[PublishLogResponse])
+async def get_publish_logs(
+    article_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    tenant_id: UUID = Depends(get_active_tenant_id),
+) -> list[PublishLog]:
+    """查看文章的发布历史。"""
+    # 验证文章存在且属于当前租户
+    stmt = select(Article).where(Article.id == article_id, Article.tenant_id == tenant_id)
+    result = await db.execute(stmt)
+    article = result.scalar_one_or_none()
+
+    if not article:
+        raise HTTPException(status_code=404, detail="文章不存在")
+
+    # 查询发布日志
+    stmt = (
+        select(PublishLog)
+        .where(PublishLog.article_id == article_id)
+        .order_by(PublishLog.published_at.desc())
+    )
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
