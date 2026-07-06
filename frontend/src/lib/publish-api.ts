@@ -7,6 +7,23 @@ import type { ApiError } from '@/types/api';
 const API_BASE = '/api/v1';
 
 // ============================================================
+// Helper: 获取 accessToken（兼容 zustand persist 数据结构）
+// ============================================================
+
+function getAccessToken(): string {
+  const stored = localStorage.getItem('fnai.auth');
+  if (!stored) throw new Error('未登录');
+
+  const parsed = JSON.parse(stored);
+  // zustand persist 的格式：{ state: { accessToken, ... }, version: 0 }
+  // 兼容直接存储的格式：{ accessToken, ... }
+  const token = parsed.state?.accessToken || parsed.accessToken;
+  if (!token) throw new Error('Token 无效，请重新登录');
+
+  return token;
+}
+
+// ============================================================
 // 类型定义
 // ============================================================
 
@@ -120,12 +137,10 @@ export interface PublishLog {
 // ============================================================
 
 export async function listPublishTargets(activeOnly = true): Promise<PublishTarget[]> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
 
   const res = await fetch(`${API_BASE}/publish-targets?active_only=${activeOnly}`, {
-    headers: { Authorization: `Bearer ${auth.accessToken}` },
+    headers: { Authorization: `Bearer ${token}` },
   });
 
   if (!res.ok) {
@@ -137,15 +152,15 @@ export async function listPublishTargets(activeOnly = true): Promise<PublishTarg
 }
 
 export async function createPublishTarget(data: PublishTargetCreate): Promise<PublishTarget> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
+  // Token 已由 getAccessToken() 校验
+  // 直接使用 token
 
   const res = await fetch(`${API_BASE}/publish-targets`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${auth.accessToken}`,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(data),
   });
@@ -159,15 +174,15 @@ export async function createPublishTarget(data: PublishTargetCreate): Promise<Pu
 }
 
 export async function updatePublishTarget(id: string, data: PublishTargetUpdate): Promise<PublishTarget> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
+  // Token 已由 getAccessToken() 校验
+  // 直接使用 token
 
   const res = await fetch(`${API_BASE}/publish-targets/${id}`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${auth.accessToken}`,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(data),
   });
@@ -181,13 +196,13 @@ export async function updatePublishTarget(id: string, data: PublishTargetUpdate)
 }
 
 export async function deletePublishTarget(id: string): Promise<void> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
+  // Token 已由 getAccessToken() 校验
+  // 直接使用 token
 
   const res = await fetch(`${API_BASE}/publish-targets/${id}`, {
     method: 'DELETE',
-    headers: { Authorization: `Bearer ${auth.accessToken}` },
+    headers: { Authorization: `Bearer ${token}` },
   });
 
   if (!res.ok) {
@@ -201,15 +216,15 @@ export async function deletePublishTarget(id: string): Promise<void> {
 // ============================================================
 
 export async function publishArticle(articleId: string, data: PublishRequest): Promise<PublishResponse> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
+  // Token 已由 getAccessToken() 校验
+  // 直接使用 token
 
   const res = await fetch(`${API_BASE}/articles/${articleId}/publish`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${auth.accessToken}`,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(data),
   });
@@ -223,12 +238,12 @@ export async function publishArticle(articleId: string, data: PublishRequest): P
 }
 
 export async function getPublishLogs(articleId: string): Promise<PublishLog[]> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
+  // Token 已由 getAccessToken() 校验
+  // 直接使用 token
 
   const res = await fetch(`${API_BASE}/articles/${articleId}/publish-logs`, {
-    headers: { Authorization: `Bearer ${auth.accessToken}` },
+    headers: { Authorization: `Bearer ${token}` },
   });
 
   if (!res.ok) {
@@ -244,12 +259,12 @@ export async function getPublishLogs(articleId: string): Promise<PublishLog[]> {
 // ============================================================
 
 export async function exportArticle(articleId: string, format: 'markdown' | 'html'): Promise<Blob> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
+  // Token 已由 getAccessToken() 校验
+  // 直接使用 token
 
   const res = await fetch(`${API_BASE}/articles/${articleId}/export?format=${format}`, {
-    headers: { Authorization: `Bearer ${auth.accessToken}` },
+    headers: { Authorization: `Bearer ${token}` },
   });
 
   if (!res.ok) {
@@ -265,12 +280,12 @@ export async function exportArticle(articleId: string, format: 'markdown' | 'htm
 // ============================================================
 
 export async function listWechatConfigs(): Promise<WechatConfig[]> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
+  // Token 已由 getAccessToken() 校验
+  // 直接使用 token
 
   const res = await fetch(`${API_BASE}/wechat/wechat-configs`, {
-    headers: { Authorization: `Bearer ${auth.accessToken}` },
+    headers: { Authorization: `Bearer ${token}` },
   });
 
   if (!res.ok) {
@@ -282,15 +297,15 @@ export async function listWechatConfigs(): Promise<WechatConfig[]> {
 }
 
 export async function createWechatConfig(data: WechatConfigCreate): Promise<WechatConfig> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
+  // Token 已由 getAccessToken() 校验
+  // 直接使用 token
 
   const res = await fetch(`${API_BASE}/wechat/wechat-configs`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${auth.accessToken}`,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(data),
   });
@@ -304,15 +319,15 @@ export async function createWechatConfig(data: WechatConfigCreate): Promise<Wech
 }
 
 export async function updateWechatConfig(id: string, data: WechatConfigUpdate): Promise<WechatConfig> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
+  // Token 已由 getAccessToken() 校验
+  // 直接使用 token
 
   const res = await fetch(`${API_BASE}/wechat/wechat-configs/${id}`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${auth.accessToken}`,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(data),
   });
@@ -326,13 +341,13 @@ export async function updateWechatConfig(id: string, data: WechatConfigUpdate): 
 }
 
 export async function deleteWechatConfig(id: string): Promise<void> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
+  // Token 已由 getAccessToken() 校验
+  // 直接使用 token
 
   const res = await fetch(`${API_BASE}/wechat/wechat-configs/${id}`, {
     method: 'DELETE',
-    headers: { Authorization: `Bearer ${auth.accessToken}` },
+    headers: { Authorization: `Bearer ${token}` },
   });
 
   if (!res.ok) {
@@ -346,15 +361,15 @@ export async function deleteWechatConfig(id: string): Promise<void> {
 // ============================================================
 
 export async function publishToWechat(data: WechatPublishRequest): Promise<WechatPublishResponse> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
+  // Token 已由 getAccessToken() 校验
+  // 直接使用 token
 
   const res = await fetch(`${API_BASE}/wechat/articles/${data.article_id}/publish-wechat`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${auth.accessToken}`,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(data),
   });
@@ -370,12 +385,12 @@ export async function publishToWechat(data: WechatPublishRequest): Promise<Wecha
 }
 
 export async function getWechatPublishStatus(publishId: string): Promise<WechatPublishStatus> {
-  const token = localStorage.getItem('fnai.auth');
-  if (!token) throw new Error('未登录');
-  const auth = JSON.parse(token);
+  const token = getAccessToken();
+  // Token 已由 getAccessToken() 校验
+  // 直接使用 token
 
   const res = await fetch(`${API_BASE}/wechat/publish-wechat/status/${publishId}`, {
-    headers: { Authorization: `Bearer ${auth.accessToken}` },
+    headers: { Authorization: `Bearer ${token}` },
   });
 
   if (!res.ok) {

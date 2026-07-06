@@ -277,10 +277,16 @@ async def _publish_to_webhook(article: Article, target: PublishTarget) -> str:
         raise ValueError("Webhook 配置缺少 webhook_url")
 
     headers = config.get("headers", {})
+
+    # 获取摘要（从 seo_meta 或为空）
+    summary = ""
+    if article.seo_meta and isinstance(article.seo_meta, dict):
+        summary = article.seo_meta.get("description", "")
+
     payload = {
         "title": article.title,
         "content": article.content,
-        "summary": article.summary,
+        "summary": summary,
     }
 
     async with httpx.AsyncClient(timeout=30.0) as client:

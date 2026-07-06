@@ -16,7 +16,9 @@
 
 import asyncio
 import logging
+import os
 import re
+from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
@@ -24,6 +26,9 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.wechat_token import WechatTokenError, WechatTokenManager
+
+# 默认封面图路径（微信草稿接口必填 thumb_media_id）
+_DEFAULT_COVER_PATH = Path(__file__).parent.parent / "static" / "default_cover.jpg"
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +95,7 @@ class WechatMpClient:
         author: str = "",
         digest: str = "",
         thumb_media_id: Optional[str] = None,
+        config_thumb_media_id: Optional[str] = None,
         need_open_comment: bool = True,
         only_fans_can_comment: bool = False,
     ) -> dict[str, Any]:
@@ -100,14 +106,16 @@ class WechatMpClient:
             content: 文章正文，HTML 格式（必填）
             author: 作者名称（可选）
             digest: 摘要（可选，最多 120 字）
-            thumb_media_id: 封面图素材 ID（可选）
+            thumb_media_id: 封面图素材 ID（请求中指定，优先级最高）
+            config_thumb_media_id: 配置中的默认封面图素材 ID（备选）
             need_open_comment: 是否打开评论
             only_fans_can_comment: 是否仅粉丝可评论
 
         Returns:
             {
                 "publish_id": "发布任务 ID",
-                "draft_media_id": "草稿素材 ID"
+                "draft_media_id": "草稿素材 ID",
+                "thumb_media_id": "使用的封面图素材 ID"
             }
 
         Raises:
@@ -116,27 +124,34 @@ class WechatMpClient:
         # 1. 参数验证
         self._validate_params(title, content)
 
-        # 2. 获取 access_token（带重试）
+        # 2. 确定封面图 media_id（微信草稿接口必填）
+        #    优先级：请求参数 > 配置默认 > 自动上传内置封面
+        effective_thumb = thumb_media_id or config_thumb_media_id
+        if not effective_thumb:
+            effective_thumb = await self.get_or_upload_default_thumb()
+
+        # 3. 获取 access_token（带重试）
         token = await self._get_token_with_retry()
 
-        # 3. 创建草稿（带重试）
+        # 4. 创建草稿（带重试）
         draft_media_id = await self._create_draft_with_retry(
             token=token,
             title=title,
             content=content,
             author=author,
             digest=digest,
-            thumb_media_id=thumb_media_id,
+            thumb_media_id=effective_thumb,
             need_open_comment=need_open_comment,
             only_fans_can_comment=only_fans_can_comment,
         )
 
-        # 4. 发布草稿（带重试）
+        # 5. 发布草稿（带重试）
         publish_id = await self._submit_publish_with_retry(token, draft_media_id)
 
         return {
             "publish_id": publish_id,
             "draft_media_id": draft_media_id,
+            "thumb_media_id": effective_thumb,
         }
 
     async def get_publish_status(self, publish_id: str) -> dict[str, Any]:
@@ -231,6 +246,92 @@ class WechatMpClient:
                 )
 
             return data["url"]
+
+    async def upload_thumb_image(self, image_data: bytes, filename: str = "cover.jpg") -> str:
+        """上传永久素材图片，获取 thumb_media_id。
+
+        微信草稿接口的 thumb_media_id 必须是永久素材的 media_id。
+        使用 /cgi-bin/material/add_material?type=thumb 上传。
+
+        Args:
+            image_data: 图片二进制数据（JPEG，建议 900x383，< 64KB）
+            filename: 文件名
+
+        Returns:
+            media_id（永久素材 ID，用于 thumb_media_id）
+
+        Raises:
+            WechatMpError: 上传失败
+        """
+        token = await self._get_token_with_retry()
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                files = {"media": (filename, image_data, "image/jpeg")}
+                response = await client.post(
+                    f"{self.UPLOAD_MATERIAL_URL}?access_token={token}&type=thumb",
+                    files=files,
+                )
+                data = response.json()
+            except httpx.TimeoutException:
+                raise WechatMpError(
+                    code="timeout",
+                    message="上传封面图超时",
+                    retryable=True,
+                )
+            except httpx.NetworkError as e:
+                raise WechatMpError(
+                    code="network_error",
+                    message=f"网络错误: {e}",
+                    retryable=True,
+                )
+
+            if "errcode" in data and data["errcode"] != 0:
+                raise WechatMpError(
+                    code="upload_failed",
+                    message=f"上传封面图失败: {data.get('errmsg', '未知错误')}",
+                    wx_errcode=data.get("errcode"),
+                )
+
+            media_id = data.get("media_id")
+            if not media_id:
+                raise WechatMpError(
+                    code="upload_failed",
+                    message=f"上传封面图返回数据异常: {data}",
+                )
+
+            logger.info(f"Thumb uploaded: media_id={media_id}")
+            return media_id
+
+    async def get_or_upload_default_thumb(self, config_thumb_media_id: Optional[str] = None) -> str:
+        """获取默认封面图的 media_id。
+
+        优先使用配置中已有的 thumb_media_id，
+        否则上传内置默认封面图并返回新的 media_id。
+
+        Args:
+            config_thumb_media_id: 配置中已存储的 thumb_media_id（可选）
+
+        Returns:
+            有效的 thumb_media_id
+
+        Raises:
+            WechatMpError: 上传失败且无可用默认封面
+        """
+        # 如果配置中已有 thumb_media_id，直接使用
+        if config_thumb_media_id:
+            return config_thumb_media_id
+
+        # 上传默认封面图
+        if not _DEFAULT_COVER_PATH.exists():
+            raise WechatMpError(
+                code="no_thumb",
+                message="未提供封面图且默认封面图不存在，请在配置中上传封面图",
+            )
+
+        logger.info("Uploading default cover image as thumb material")
+        image_data = _DEFAULT_COVER_PATH.read_bytes()
+        return await self.upload_thumb_image(image_data, "default_cover.jpg")
 
     # ============================================================
     # 内部方法：带重试的 API 调用
@@ -445,8 +546,10 @@ class WechatMpClient:
                     message=f"提交发布返回数据异常: {data}",
                 )
 
-            logger.info(f"Publish submitted: publish_id={data['publish_id']}")
-            return data["publish_id"]
+            # 微信返回的 publish_id 可能是整数，统一转为字符串
+            publish_id = str(data["publish_id"])
+            logger.info(f"Publish submitted: publish_id={publish_id}")
+            return publish_id
 
     # ============================================================
     # 内部方法：HTML 清理

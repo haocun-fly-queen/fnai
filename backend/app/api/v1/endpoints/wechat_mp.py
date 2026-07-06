@@ -128,8 +128,21 @@ async def publish_to_wechat(
             or "FNAI"
         )
 
-        # 使用请求中的摘要，或文章的 summary
-        digest = request.digest or article.summary or ""
+        # 使用请求中的摘要，或从 seo_meta 取，或截取 content 前 120 字
+        digest = request.digest
+        if not digest:
+            # 尝试从 seo_meta 取 description
+            if article.seo_meta and isinstance(article.seo_meta, dict):
+                digest = article.seo_meta.get("description", "")
+        if not digest and article.content:
+            # 截取 content 前 120 字（去掉 HTML 标签）
+            import re
+            text = re.sub(r"<[^>]+>", "", article.content)
+            digest = text[:120]
+        digest = digest or ""
+
+        # 封面图：请求参数 > 配置默认 > 自动上传
+        config_thumb = wechat_config.config.get("thumb_media_id", "")
 
         result = await client.publish_article(
             title=article.title,
@@ -137,9 +150,19 @@ async def publish_to_wechat(
             author=author,
             digest=digest,
             thumb_media_id=request.thumb_media_id,
+            config_thumb_media_id=config_thumb or None,
             need_open_comment=request.need_open_comment,
             only_fans_can_comment=request.only_fans_can_comment,
         )
+
+        # 如果自动上传了新的封面图，保存到配置中供后续复用
+        new_thumb = result.get("thumb_media_id")
+        if new_thumb and new_thumb != config_thumb:
+            new_config = dict(wechat_config.config)
+            new_config["thumb_media_id"] = new_thumb
+            wechat_config.config = new_config
+            await db.commit()
+            logger.info(f"Auto-uploaded default thumb, saved media_id to config")
 
         # 更新发布日志为"已提交"（微信发布是异步的，真正成功要轮询状态）
         publish_log.status = PublishStatus.PENDING  # 等待微信审核/发布
@@ -478,9 +501,14 @@ async def _handle_publish_fallback(
 
 def _format_for_wechat(article: Article) -> str:
     """格式化内容为微信公众号可复制格式。"""
+    # 获取摘要（从 seo_meta 或截取 content）
+    summary = "无"
+    if article.seo_meta and isinstance(article.seo_meta, dict):
+        summary = article.seo_meta.get("description", "无")
+
     content = f"""【标题】{article.title}
 
-【摘要】{article.summary or '无'}
+【摘要】{summary}
 
 【正文】
 {article.content}

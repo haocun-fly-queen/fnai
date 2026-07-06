@@ -20,9 +20,10 @@ from pydantic import BaseModel, Field
 
 
 class WechatPublishRequest(BaseModel):
-    """微信发布请求。"""
+    """微信发布请求。
 
-    article_id: UUID = Field(..., description="文章 ID")
+    注意：article_id 已经在路径参数中，不需要在 body 里重复。
+    """
 
     author: Optional[str] = Field(
         default=None,

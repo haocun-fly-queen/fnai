@@ -39,6 +39,7 @@ import {
 } from '@/lib/article-api';
 import { ExportDialog } from '@/components/ExportDialog';
 import { PublishDialog } from '@/components/PublishDialog';
+import { PublishStatusCard } from '@/components/PublishStatusCard';
 
 // ---- 工具栏按钮组件 ----
 function ToolBtn({
@@ -761,8 +762,11 @@ export function ArticleEditorPage(): JSX.Element {
             </div>
           </div>
 
-          {/* 右侧栏：SEO + 版本 */}
+          {/* 右侧栏：SEO + 发布状态 + 版本 */}
           <div className="space-y-4">
+            {/* 发布状态 */}
+            {id && <PublishStatusCard articleId={id} />}
+
             {/* SEO 预览 */}
             {article.seo_meta && (
               <div className="rounded-lg border border-slate-200 bg-white p-4">
