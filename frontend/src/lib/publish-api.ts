@@ -3,6 +3,7 @@
  */
 
 import type { ApiError } from '@/types/api';
+import { api } from './api';
 
 const API_BASE = '/api/v1';
 
@@ -393,4 +394,99 @@ export async function getWechatPublishStatus(publishId: string): Promise<WechatP
   }
 
   return res.json();
+}
+
+// ============================================================
+// 微博相关类型
+// ============================================================
+
+export interface WeiboConfig {
+  id: string;
+  name: string;
+  cookie_preview?: string;
+  default_suffix?: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WeiboConfigCreate {
+  name: string;
+  cookie: string;
+  default_suffix?: string;
+}
+
+export interface WeiboConfigUpdate {
+  name?: string;
+  cookie?: string;
+  default_suffix?: string;
+}
+
+export interface WeiboPublishRequest {
+  article_id: string;
+  content?: string;
+  suffix?: string;
+  image_url?: string;
+}
+
+export interface WeiboPublishResponse {
+  success: boolean;
+  message: string;
+  publish_id?: string;
+  weibo_id?: string;
+  weibo_url?: string;
+}
+
+export interface WeiboPublishStatus {
+  publish_id: string;
+  status: string;
+  weibo_id?: string;
+  weibo_url?: string;
+  fail_reason?: string;
+}
+
+// ============================================================
+// 微博配置管理
+// ============================================================
+
+export async function listWeiboConfigs(): Promise<WeiboConfig[]> {
+  const res = await api.get('/weibo/weibo-configs');
+  return res.data;
+}
+
+export async function createWeiboConfig(data: WeiboConfigCreate): Promise<WeiboConfig> {
+  const res = await api.post('/weibo/weibo-configs', data);
+  return res.data;
+}
+
+export async function updateWeiboConfig(id: string, data: WeiboConfigUpdate): Promise<WeiboConfig> {
+  const res = await api.put(`/weibo/weibo-configs/${id}`, data);
+  return res.data;
+}
+
+export async function deleteWeiboConfig(id: string): Promise<void> {
+  await api.delete(`/weibo/weibo-configs/${id}`);
+}
+
+export async function verifyWeiboCookie(cookie: string): Promise<{ valid: boolean; user?: any; message?: string }> {
+  const res = await api.post('/weibo/verify-cookie', { cookie });
+  return res.data;
+}
+
+// ============================================================
+// 微博发布
+// ============================================================
+
+export async function publishToWeibo(data: WeiboPublishRequest): Promise<WeiboPublishResponse> {
+  const res = await api.post(`/weibo/articles/${data.article_id}/publish-weibo`, {
+    content: data.content,
+    suffix: data.suffix,
+    image_url: data.image_url,
+  });
+  return res.data;
+}
+
+export async function getWeiboPublishStatus(publishId: string): Promise<WeiboPublishStatus> {
+  const res = await api.get(`/weibo/publish-weibo/status/${publishId}`);
+  return res.data;
 }

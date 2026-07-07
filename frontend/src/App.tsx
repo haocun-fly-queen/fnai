@@ -10,6 +10,7 @@ import { ArticlesPage } from '@/pages/ArticlesPage';
 import { ArticleEditorPage } from '@/pages/ArticleEditorPage';
 import { PublishTargetsPage } from '@/pages/PublishTargetsPage';
 import { WechatConfigPage } from '@/pages/WechatConfigPage';
+import { WeiboConfigPage } from '@/pages/WeiboConfigPage';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { useAuthStore } from '@/stores/auth';
 
@@ -95,6 +96,14 @@ export function App(): JSX.Element {
         element={
           <ProtectedRoute>
             <WechatConfigPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/weibo-config"
+        element={
+          <ProtectedRoute>
+            <WeiboConfigPage />
           </ProtectedRoute>
         }
       />

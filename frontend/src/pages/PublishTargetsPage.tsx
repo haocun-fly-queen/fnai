@@ -78,6 +78,12 @@ export function PublishTargetsPage(): JSX.Element {
               📱 微信公众号配置
             </button>
             <button
+              className="rounded border border-orange-300 px-4 py-2 text-sm font-medium text-orange-700 hover:bg-orange-50"
+              onClick={() => navigate('/weibo-config')}
+            >
+              📢 微博配置
+            </button>
+            <button
               className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
               onClick={() => setShowCreateDialog(true)}
             >
