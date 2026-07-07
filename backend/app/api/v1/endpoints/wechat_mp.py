@@ -95,7 +95,15 @@ async def publish_to_wechat(
         )
 
     # 2. 获取微信公众号配置
-    wechat_config = await _get_wechat_config(db, tenant_id)
+    stmt = select(PublishTarget).where(
+        PublishTarget.id == request.config_id,
+        PublishTarget.tenant_id == tenant_id,
+        PublishTarget.type == PublishTargetType.WECHAT_MP,
+        PublishTarget.is_active == True,  # noqa: E712
+    )
+    result = await db.execute(stmt)
+    wechat_config = result.scalar_one_or_none()
+
     if not wechat_config:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -271,17 +279,24 @@ async def create_wechat_config(
 ) -> WechatConfigResponse:
     """创建微信公众号配置。
 
-    每个租户只能有一个微信公众号配置。
+    一个租户可以配置多个微信公众号。
     """
     tenant_id = membership.tenant_id
 
-    # 检查是否已存在
-    existing = await _get_wechat_config(db, tenant_id)
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="已存在微信公众号配置，请先删除后再创建",
-        )
+    # 检查 app_id 是否已存在（同一租户下 app_id 不能重复）
+    stmt = select(PublishTarget).where(
+        PublishTarget.tenant_id == tenant_id,
+        PublishTarget.type == PublishTargetType.WECHAT_MP,
+    )
+    result = await db.execute(stmt)
+    existing_configs = result.scalars().all()
+
+    for config in existing_configs:
+        if config.config.get("app_id") == request.app_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"该 App ID ({request.app_id}) 已存在配置",
+            )
 
     # 创建配置
     config = PublishTarget(

@@ -32,6 +32,7 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
 
   // 微信公众号相关状态
   const [wechatConfigs, setWechatConfigs] = useState<WechatConfig[]>([]);
+  const [selectedWechatId, setSelectedWechatId] = useState('');
   const [wechatAuthor, setWechatAuthor] = useState('');
   const [wechatDigest, setWechatDigest] = useState('');
 
@@ -62,6 +63,11 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
       // 自动选择第一个目标
       if (targetsData.length > 0 && targetsData[0]) {
         setSelectedTargetId(targetsData[0].id);
+      }
+
+      // 自动选择第一个微信配置
+      if (wechatData.length > 0 && wechatData[0]) {
+        setSelectedWechatId(wechatData[0].id);
       }
 
       // 如果有微信配置，自动切换到微信模式
@@ -113,6 +119,11 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
       return;
     }
 
+    if (!selectedWechatId) {
+      setError('请选择要发布的微信公众号');
+      return;
+    }
+
     setPublishing(true);
     setError('');
     setSuccessMsg('');
@@ -121,6 +132,7 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
     try {
       const result: WechatPublishResponse = await publishToWechat({
         article_id: articleId,
+        config_id: selectedWechatId,
         author: wechatAuthor || undefined,
         digest: wechatDigest || undefined,
       });
@@ -164,7 +176,9 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
     }
   }
 
+  // 动态获取选中的目标/配置
   const selectedTarget = targets.find((t) => t.id === selectedTargetId);
+  const selectedWechatConfig = wechatConfigs.find((c) => c.id === selectedWechatId);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
@@ -300,14 +314,27 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
                   </div>
                 ) : (
                   <>
-                    {/* 已配置信息 */}
-                    <div className="rounded-lg border border-green-200 bg-green-50 p-3">
-                      <div className="text-sm font-medium text-green-800">
-                        公众号：{wechatConfigs[0]?.name}
-                      </div>
-                      <div className="mt-1 text-xs text-green-600">
-                        AppID: {wechatConfigs[0]?.app_id}
-                      </div>
+                    {/* 选择微信公众号配置 */}
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-slate-700">
+                        选择公众号
+                      </label>
+                      <select
+                        className="w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-green-500 focus:outline-none"
+                        value={selectedWechatId}
+                        onChange={(e) => setSelectedWechatId(e.target.value)}
+                      >
+                        {wechatConfigs.map((config) => (
+                          <option key={config.id} value={config.id}>
+                            {config.name}
+                          </option>
+                        ))}
+                      </select>
+                      {selectedWechatConfig && (
+                        <p className="mt-1 text-xs text-slate-500">
+                          AppID: {selectedWechatConfig.app_id}
+                        </p>
+                      )}
                     </div>
 
                     {/* 作者 */}

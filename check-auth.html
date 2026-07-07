@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>检查认证状态</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #f5f5f5; }
+        .section { background: white; padding: 15px; margin: 10px 0; border-radius: 5px; }
+        .error { color: red; }
+        .success { color: green; }
+        .warning { color: orange; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+        pre { background: #f0f0f0; padding: 10px; overflow: auto; }
+    </style>
+</head>
+<body>
+    <h1>🔍 FNAI 认证状态检查</h1>
+
+    <div class="section">
+        <h2>1. localStorage 检查</h2>
+        <button onclick="checkStorage()">检查存储</button>
+        <pre id="storage-result">点击按钮检查...</pre>
+    </div>
+
+    <div class="section">
+        <h2>2. Token 解析</h2>
+        <button onclick="decodeToken()">解析 Token</button>
+        <pre id="token-result">点击按钮检查...</pre>
+    </div>
+
+    <div class="section">
+        <h2>3. 测试 API</h2>
+        <button onclick="testMe()">测试 /auth/me</button>
+        <button onclick="testInvitations()">测试 /invitations</button>
+        <pre id="api-result">点击按钮测试...</pre>
+    </div>
+
+    <div class="section">
+        <h2>4. 快速修复</h2>
+        <button onclick="clearAndReload()" style="background: #ff4444; color: white;">清除并重新登录</button>
+    </div>
+
+    <script>
+        function checkStorage() {
+            const result = document.getElementById('storage-result');
+            const auth = localStorage.getItem('fnai.auth');
+
+            if (!auth) {
+                result.innerHTML = '<span class="error">❌ 未找到认证信息</span>\n\n请重新登录！';
+                return;
+            }
+
+            try {
+                const parsed = JSON.parse(auth);
+                const token = parsed.state?.accessToken || parsed.accessToken;
+                const tenantId = parsed.state?.activeTenantId || parsed.activeTenantId;
+
+                result.innerHTML = `<span class="success">✅ 找到认证信息</span>\n\n` +
+                    `Token: ${token ? token.substring(0, 20) + '...' : '<span class="error">不存在</span>'}\n` +
+                    `Tenant ID: ${tenantId || '<span class="error">不存在</span>'}\n\n` +
+                    `完整数据:\n${JSON.stringify(parsed, null, 2)}`;
+            } catch (e) {
+                result.innerHTML = `<span class="error">❌ 数据解析失败: ${e.message}</span>`;
+            }
+        }
+
+        function decodeToken() {
+            const result = document.getElementById('token-result');
+            const auth = localStorage.getItem('fnai.auth');
+
+            if (!auth) {
+                result.innerHTML = '<span class="error">❌ 未找到认证信息</span>';
+                return;
+            }
+
+            try {
+                const parsed = JSON.parse(auth);
+                const token = parsed.state?.accessToken || parsed.accessToken;
+
+                if (!token) {
+                    result.innerHTML = '<span class="error">❌ Token 不存在</span>';
+                    return;
+                }
+
+                const parts = token.split('.');
+                if (parts.length !== 3) {
+                    result.innerHTML = '<span class="error">❌ Token 格式错误</span>';
+                    return;
+                }
+
+                const payload = JSON.parse(atob(parts[1]));
+                const now = Math.floor(Date.now() / 1000);
+                const exp = payload.exp;
+                const isExpired = exp < now;
+                const timeLeft = exp - now;
+
+                result.innerHTML = `Token Payload:\n${JSON.stringify(payload, null, 2)}\n\n` +
+                    `当前时间: ${now} (${new Date(now * 1000).toLocaleString()})\n` +
+                    `过期时间: ${exp} (${new Date(exp * 1000).toLocaleString()})\n` +
+                    `剩余时间: ${Math.floor(timeLeft / 60)} 分钟\n\n` +
+                    `状态: ${isExpired ? '<span class="error">❌ 已过期</span>' : '<span class="success">✅ 有效</span>'}`;
+            } catch (e) {
+                result.innerHTML = `<span class="error">❌ Token 解析失败: ${e.message}</span>`;
+            }
+        }
+
+        async function testMe() {
+            const result = document.getElementById('api-result');
+            const auth = localStorage.getItem('fnai.auth');
+
+            if (!auth) {
+                result.innerHTML = '<span class="error">❌ 未找到认证信息</span>';
+                return;
+            }
+
+            try {
+                const parsed = JSON.parse(auth);
+                const token = parsed.state?.accessToken || parsed.accessToken;
+                const tenantId = parsed.state?.activeTenantId || parsed.activeTenantId;
+
+                result.innerHTML = '⏳ 请求中...\n';
+
+                const response = await fetch('/api/v1/auth/me', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'X-Tenant-Id': tenantId || ''
+                    }
+                });
+
+                result.innerHTML = `状态码: ${response.status}\n\n`;
+
+                if (response.ok) {
+                    const data = await response.json();
+                    result.innerHTML += `<span class="success">✅ 请求成功</span>\n\n${JSON.stringify(data, null, 2)}`;
+                } else {
+                    const error = await response.text();
+                    result.innerHTML += `<span class="error">❌ 请求失败</span>\n\n${error}`;
+                }
+            } catch (e) {
+                result.innerHTML = `<span class="error">❌ 请求异常: ${e.message}</span>`;
+            }
+        }
+
+        async function testInvitations() {
+            const result = document.getElementById('api-result');
+            const auth = localStorage.getItem('fnai.auth');
+
+            if (!auth) {
+                result.innerHTML = '<span class="error">❌ 未找到认证信息</span>';
+                return;
+            }
+
+            try {
+                const parsed = JSON.parse(auth);
+                const token = parsed.state?.accessToken || parsed.accessToken;
+                const tenantId = parsed.state?.activeTenantId || parsed.activeTenantId;
+
+                result.innerHTML = '⏳ 请求中...\n';
+
+                const response = await fetch('/api/v1/invitations', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'X-Tenant-Id': tenantId || ''
+                    }
+                });
+
+                result.innerHTML = `状态码: ${response.status}\n\n`;
+
+                if (response.ok) {
+                    const data = await response.json();
+                    result.innerHTML += `<span class="success">✅ 请求成功</span>\n\n${JSON.stringify(data, null, 2)}`;
+                } else {
+                    const error = await response.text();
+                    result.innerHTML += `<span class="error">❌ 请求失败</span>\n\n${error}`;
+                }
+            } catch (e) {
+                result.innerHTML = `<span class="error">❌ 请求异常: ${e.message}</span>`;
+            }
+        }
+
+        function clearAndReload() {
+            if (confirm('确定要清除认证信息并重新登录吗？')) {
+                localStorage.removeItem('fnai.auth');
+                alert('已清除！页面即将刷新，请重新登录。');
+                window.location.reload();
+            }
+        }
+
+        // 页面加载时自动检查
+        window.onload = function() {
+            checkStorage();
+            decodeToken();
+        };
+    </script>
+</body>
+</html>

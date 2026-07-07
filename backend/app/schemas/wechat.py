@@ -25,6 +25,11 @@ class WechatPublishRequest(BaseModel):
     注意：article_id 已经在路径参数中，不需要在 body 里重复。
     """
 
+    config_id: UUID = Field(
+        ...,
+        description="微信公众号配置 ID（从 /wechat-configs 获取）",
+    )
+
     author: Optional[str] = Field(
         default=None,
         max_length=16,

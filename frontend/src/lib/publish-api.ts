@@ -58,6 +58,7 @@ export interface WechatConfigUpdate {
 
 export interface WechatPublishRequest {
   article_id: string;
+  config_id: string; // 微信公众号配置 ID
   author?: string;
   digest?: string;
   thumb_media_id?: string;
