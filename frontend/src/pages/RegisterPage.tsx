@@ -42,7 +42,7 @@ export function RegisterPage(): JSX.Element {
       let activeTenantId: string | undefined;
       if (me.memberships.length > 0) {
         const ownerMembership = me.memberships.find((m) => m.role === 'owner');
-        activeTenantId = ownerMembership?.tenant.id || me.memberships[0].tenant.id;
+        activeTenantId = ownerMembership?.tenant.id || me.memberships[0]?.tenant.id;
       }
 
       setSession({
