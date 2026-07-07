@@ -12,6 +12,7 @@ class PublishTargetType(str, Enum):
 
     WORDPRESS = "wordpress"
     WEBHOOK = "webhook"
+    WEIBO = "WEIBO"
 
 
 class PublishStatus(str, Enum):

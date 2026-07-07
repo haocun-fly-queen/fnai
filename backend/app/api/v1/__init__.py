@@ -21,6 +21,7 @@ from app.api.v1.endpoints import (
     memberships,
     tenants,
     wechat_mp,
+    weibo,
 )
 from app.api.v1 import export, publish
 
@@ -35,4 +36,5 @@ api_router.include_router(article.router)  # 文章 + 模板（阶段 4 Step 2�
 api_router.include_router(export.router, prefix="/articles", tags=["export"])  # 导出（阶段 5）
 api_router.include_router(publish.router, tags=["publish"])  # 发布（阶段 5）
 api_router.include_router(wechat_mp.router, prefix="/wechat", tags=["wechat"])  # 微信公众号（阶段 5）
+api_router.include_router(weibo.router, prefix="/weibo", tags=["weibo"])  # 微博（阶段 5）
 api_router.include_router(demo.router)  # 演示 require_role 用法

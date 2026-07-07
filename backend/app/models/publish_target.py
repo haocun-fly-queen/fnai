@@ -21,6 +21,7 @@ class PublishTargetType(str, PyEnum):
     WORDPRESS = "WORDPRESS"  # WordPress REST API（PG 存大写）
     WEBHOOK = "WEBHOOK"  # 自定义 Webhook
     WECHAT_MP = "WECHAT_MP"  # 微信公众号
+    WEIBO = "WEIBO"  # 微博
 
 
 class PublishTarget(Base):

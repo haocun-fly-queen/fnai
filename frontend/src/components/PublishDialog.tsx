@@ -8,9 +8,13 @@ import {
   publishArticle,
   listWechatConfigs,
   publishToWechat,
+  listWeiboConfigs,
+  publishToWeibo,
   type PublishTarget,
   type WechatConfig,
   type WechatPublishResponse,
+  type WeiboConfig,
+  type WeiboPublishResponse,
 } from '@/lib/publish-api';
 
 interface PublishDialogProps {
@@ -19,7 +23,7 @@ interface PublishDialogProps {
   onSuccess: () => void;
 }
 
-type PublishMode = 'wordpress' | 'webhook' | 'wechat';
+type PublishMode = 'wordpress' | 'webhook' | 'wechat' | 'weibo';
 
 export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogProps): JSX.Element {
   // 发布模式
@@ -34,6 +38,11 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
   const [wechatConfigs, setWechatConfigs] = useState<WechatConfig[]>([]);
   const [wechatAuthor, setWechatAuthor] = useState('');
   const [wechatDigest, setWechatDigest] = useState('');
+
+  // 微博相关状态
+  const [weiboConfigs, setWeiboConfigs] = useState<WeiboConfig[]>([]);
+  const [weiboContent, setWeiboContent] = useState('');
+  const [weiboSuffix, setWeiboSuffix] = useState('');
 
   // 通用状态
   const [loading, setLoading] = useState(false);
@@ -50,14 +59,16 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
   async function loadData() {
     setLoading(true);
     try {
-      // 并行加载发布目标和微信配置
-      const [targetsData, wechatData] = await Promise.all([
+      // 并行加载发布目标、微信配置、微博配置
+      const [targetsData, wechatData, weiboData] = await Promise.all([
         listPublishTargets(true),
         listWechatConfigs(),
+        listWeiboConfigs(),
       ]);
 
       setTargets(targetsData);
       setWechatConfigs(wechatData);
+      setWeiboConfigs(weiboData);
 
       // 自动选择第一个目标
       if (targetsData.length > 0 && targetsData[0]) {
@@ -147,6 +158,40 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
     }
   }
 
+  // 微博发布
+  async function handlePublishWeibo() {
+    if (weiboConfigs.length === 0) {
+      setError('未配置微博账号，请先配置');
+      return;
+    }
+
+    setPublishing(true);
+    setError('');
+    setSuccessMsg('');
+
+    try {
+      const result: WeiboPublishResponse = await publishToWeibo({
+        article_id: articleId,
+        content: weiboContent || undefined,
+        suffix: weiboSuffix || undefined,
+      });
+
+      if (result.success) {
+        setSuccessMsg(result.message || '已提交发布');
+        onSuccess();
+        if (result.publish_id) {
+          setSuccessMsg(`${result.message}（发布ID: ${result.publish_id}）`);
+        }
+      } else {
+        setError(result.message || '发布失败');
+      }
+    } catch (err: any) {
+      setError(err.message || '发布失败');
+    } finally {
+      setPublishing(false);
+    }
+  }
+
   // 复制内容到剪贴板
   async function handleCopy() {
     try {
@@ -195,6 +240,16 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
             onClick={() => setMode('wechat')}
           >
             微信公众号
+          </button>
+          <button
+            className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+              mode === 'weibo'
+                ? 'bg-orange-600 text-white'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+            onClick={() => setMode('weibo')}
+          >
+            微博
           </button>
         </div>
 
@@ -280,6 +335,80 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
                         disabled={publishing || targets.length === 0}
                       >
                         {publishing ? '发布中...' : '🚀 发布'}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* 微博模式 */}
+            {mode === 'weibo' && (
+              <div className="space-y-4">
+                {weiboConfigs.length === 0 ? (
+                  <div className="py-8 text-center">
+                    <div className="mb-4 text-4xl">📢</div>
+                    <p className="mb-2 text-sm text-slate-600">暂未配置微博账号</p>
+                    <p className="text-xs text-slate-400">
+                      请先在「发布目标管理 → 微博配置」中添加
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    {/* 已配置信息 */}
+                    <div className="rounded-lg border border-orange-200 bg-orange-50 p-3">
+                      <div className="text-sm font-medium text-orange-800">
+                        微博号：{weiboConfigs[0]?.name}
+                      </div>
+                    </div>
+
+                    {/* 微博内容 */}
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-slate-700">
+                        微博正文（可选，留空自动取文章摘要）
+                      </label>
+                      <textarea
+                        className="w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-orange-500 focus:outline-none"
+                        rows={4}
+                        placeholder="留空自动使用文章标题+摘要"
+                        value={weiboContent}
+                        onChange={(e) => setWeiboContent(e.target.value)}
+                        maxLength={2000}
+                      />
+                      <p className="mt-1 text-xs text-slate-400">
+                        {weiboContent.length}/2000
+                      </p>
+                    </div>
+
+                    {/* 尾部内容 */}
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-slate-700">
+                        尾部追加（可选，如话题标签）
+                      </label>
+                      <input
+                        type="text"
+                        className="w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-orange-500 focus:outline-none"
+                        placeholder="如：#医药健康#"
+                        value={weiboSuffix}
+                        onChange={(e) => setWeiboSuffix(e.target.value)}
+                      />
+                    </div>
+
+                    {/* 发布按钮 */}
+                    <div className="flex justify-end gap-2 pt-2">
+                      <button
+                        className="rounded border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
+                        onClick={onClose}
+                        disabled={publishing}
+                      >
+                        取消
+                      </button>
+                      <button
+                        className="rounded bg-orange-600 px-4 py-2 text-sm font-medium text-white hover:bg-orange-700 disabled:opacity-50"
+                        onClick={() => void handlePublishWeibo()}
+                        disabled={publishing}
+                      >
+                        {publishing ? '发布中...' : '📢 发布到微博'}
                       </button>
                     </div>
                   </>
