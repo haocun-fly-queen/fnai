@@ -27,7 +27,24 @@ export function RegisterPage(): JSX.Element {
     setSubmitting(true);
     try {
       const { accessToken, refreshToken } = await register(form);
+
+      // 先设置 token 以便调用 fetchMe
+      setSession({
+        accessToken,
+        refreshToken,
+        user: { id: '', email: form.email, full_name: form.full_name, is_superuser: false },
+        memberships: [],
+      });
+
       const me = await fetchMe();
+
+      // 注册后自动选择第一个租户（通常是新创建的租户）
+      let activeTenantId: string | undefined;
+      if (me.memberships.length > 0) {
+        const ownerMembership = me.memberships.find((m) => m.role === 'owner');
+        activeTenantId = ownerMembership?.tenant.id || me.memberships[0].tenant.id;
+      }
+
       setSession({
         accessToken,
         refreshToken,
@@ -38,7 +55,9 @@ export function RegisterPage(): JSX.Element {
           is_superuser: me.user.is_superuser,
         },
         memberships: me.memberships,
+        activeTenantId, // 设置激活的租户 ID
       });
+
       navigate('/dashboard');
     } catch (err) {
       const apiErr = err as ApiError;

@@ -120,16 +120,9 @@ export interface PublishResponse {
 }
 
 export interface PublishLog {
-  id: string;
-  article_id: string;
-  target_id: string;
-  status: PublishStatus;
-  remote_id?: string;
-  error_message?: string;
+  is_published: boolean;
   published_at: string;
-  created_by?: string;
-  target_name?: string;
-  article_title?: string;
+  target_name: string;
 }
 
 // ============================================================

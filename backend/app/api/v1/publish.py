@@ -13,6 +13,7 @@
 """
 
 import logging
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,6 +27,7 @@ from app.models.publish_target import PublishTarget, PublishTargetType
 from app.models.user import User
 from app.schemas.publish import (
     PublishLogResponse,
+    PublishLogSimpleResponse,
     PublishRequest,
     PublishResponse,
     PublishTargetCreate,
@@ -296,13 +298,16 @@ async def _publish_to_webhook(article: Article, target: PublishTarget) -> str:
         return response.text[:200]
 
 
-@router.get("/articles/{article_id}/publish-logs", response_model=list[PublishLogResponse])
+@router.get("/articles/{article_id}/publish-logs", response_model=list[PublishLogSimpleResponse])
 async def get_publish_logs(
     article_id: UUID,
     db: AsyncSession = Depends(get_db),
     tenant_id: UUID = Depends(get_active_tenant_id),
-) -> list[PublishLog]:
-    """查看文章的发布历史。"""
+) -> list[PublishLogSimpleResponse]:
+    """查看文章的发布历史（简化版）。
+
+    会自动更新微信发布的状态（如果是待审核状态）。
+    """
     # 验证文章存在且属于当前租户
     stmt = select(Article).where(Article.id == article_id, Article.tenant_id == tenant_id)
     result = await db.execute(stmt)
@@ -311,11 +316,55 @@ async def get_publish_logs(
     if not article:
         raise HTTPException(status_code=404, detail="文章不存在")
 
-    # 查询发布日志
+    # 查询发布日志（关联 target 以获取完整对象）
     stmt = (
-        select(PublishLog)
+        select(PublishLog, PublishTarget)
+        .join(PublishTarget, PublishLog.target_id == PublishTarget.id)
         .where(PublishLog.article_id == article_id)
         .order_by(PublishLog.published_at.desc())
     )
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    rows = result.all()
+
+    # 对于微信发布且状态为 PENDING 的记录，尝试更新状态
+    from app.services.wechat_mp import WechatMpClient
+
+    for log, target in rows:
+        if (
+            target.type == PublishTargetType.WECHAT_MP
+            and log.status == PublishStatus.PENDING
+            and log.remote_id
+        ):
+            try:
+                client = WechatMpClient(
+                    db=db,
+                    app_id=target.config["app_id"],
+                    app_secret=target.config["app_secret"],
+                )
+                status_data = await client.get_publish_status(log.remote_id)
+                wechat_status = status_data.get("publish_status", 1)
+
+                # 微信发布状态：0/3 = 成功，2 = 失败，1 = 审核中
+                if wechat_status in (0, 3):
+                    log.status = PublishStatus.SUCCESS
+                    log.published_at = datetime.utcnow()
+                    await db.commit()
+                    logger.info(f"Auto-updated PublishLog {log.id} to SUCCESS")
+                elif wechat_status == 2:
+                    log.status = PublishStatus.FAILED
+                    log.error_message = status_data.get("fail_reason", "微信审核失败")
+                    await db.commit()
+                    logger.info(f"Auto-updated PublishLog {log.id} to FAILED")
+            except Exception as e:
+                logger.warning(f"Failed to update wechat status for log {log.id}: {e}")
+                # 失败不影响返回结果，继续处理
+
+    # 转换为简化响应
+    return [
+        PublishLogSimpleResponse(
+            is_published=(log.status == PublishStatus.SUCCESS),
+            published_at=log.published_at,
+            target_name=target.name,
+        )
+        for log, target in rows
+    ]

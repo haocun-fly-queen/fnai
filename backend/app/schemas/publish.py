@@ -81,7 +81,7 @@ class PublishResponse(BaseModel):
 
 
 class PublishLogResponse(BaseModel):
-    """发布日志响应体。"""
+    """发布日志响应体（完整版，供需要详细信息的场景）。"""
 
     id: UUID
     article_id: UUID
@@ -95,6 +95,17 @@ class PublishLogResponse(BaseModel):
     # 关联信息（可选，前端展示用）
     target_name: str | None = None
     article_title: str | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class PublishLogSimpleResponse(BaseModel):
+    """发布日志响应体（简化版）—— 只返回是否已发布和发布时间。"""
+
+    is_published: bool = Field(..., description="是否已发布成功")
+    published_at: datetime = Field(..., description="发布时间（包括失败的尝试）")
+    target_name: str = Field(..., description="发布目标名称（如'微信公众号'）")
 
     class Config:
         from_attributes = True

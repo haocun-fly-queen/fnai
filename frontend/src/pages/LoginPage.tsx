@@ -20,14 +20,25 @@ export function LoginPage(): JSX.Element {
     setSubmitting(true);
     try {
       const tokens = await login({ email, password });
+
+      // 先用临时数据设置 token，以便 fetchMe 能正常调用
       setSession({
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
-        user: { id: '', email, full_name: null, is_superuser: false }, // filled in by fetchMe
+        user: { id: '', email, full_name: null, is_superuser: false },
         memberships: [],
       });
+
       // Pull the real user + memberships with the new token.
       const me = await fetchMe();
+
+      // 自动选择第一个 OWNER 租户作为激活租户，如果没有 OWNER 则选择第一个租户
+      let activeTenantId: string | undefined;
+      if (me.memberships.length > 0) {
+        const ownerMembership = me.memberships.find((m) => m.role === 'owner');
+        activeTenantId = ownerMembership?.tenant.id || me.memberships[0].tenant.id;
+      }
+
       setSession({
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
@@ -38,7 +49,9 @@ export function LoginPage(): JSX.Element {
           is_superuser: me.user.is_superuser,
         },
         memberships: me.memberships,
+        activeTenantId, // 设置激活的租户 ID
       });
+
       navigate('/dashboard');
     } catch (err) {
       const apiErr = err as ApiError;
