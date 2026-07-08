@@ -176,7 +176,9 @@ function CreateConfigDialog({ onClose, onSuccess }: CreateConfigDialogProps): JS
   // 自动获取 Cookie 相关状态
   const [autoGetting, setAutoGetting] = useState(false);
   const [autoStatus, setAutoStatus] = useState('');
-  const LOCAL_SERVICE = 'http://localhost:5001';
+  // 用 127.0.0.1 而不是 localhost：Windows 上 localhost 常优先解析为 IPv6 (::1)，
+  // 而本地取 Cookie 服务只监听 IPv4，会导致 ERR_CONNECTION_REFUSED。
+  const LOCAL_SERVICE = 'http://127.0.0.1:5001';
 
   // 自动获取 Cookie
   async function handleAutoGetCookie() {
@@ -343,8 +345,8 @@ function CreateConfigDialog({ onClose, onSuccess }: CreateConfigDialogProps): JS
             )}
           </div>
 
-          {/* 验证按钮 */}
-          <div>
+          {/* 验证按钮 - 暂时隐藏 */}
+          <div className="hidden">
             <button
               className="rounded border border-orange-300 px-3 py-1.5 text-xs text-orange-600 hover:bg-orange-50 disabled:opacity-50"
               onClick={() => void handleVerify()}

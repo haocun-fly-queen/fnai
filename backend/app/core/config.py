@@ -46,8 +46,8 @@ class Settings(BaseSettings):
     # ----- Auth -----
     jwt_secret: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 15
-    refresh_token_expire_days: int = 7
+    access_token_expire_minutes: int = 60    # 改为60分钟（1小时）
+    refresh_token_expire_days: int = 30      # 改为30天
 
     # ----- AI -----
     openai_api_key: str = ""

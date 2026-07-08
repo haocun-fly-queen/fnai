@@ -129,6 +129,87 @@ class WechatPublishStatusResponse(BaseModel):
 
 
 # ============================================================
+# 发布历史相关 Schema
+# ============================================================
+
+
+class WechatPublishHistoryItem(BaseModel):
+    """微信发布历史项。"""
+
+    id: UUID = Field(..., description="发布记录ID")
+
+    publish_id: Optional[str] = Field(
+        default=None,
+        description="发布任务ID（从remote_id解析）",
+    )
+
+    status: str = Field(..., description="发布状态: pending/success/failed")
+
+    published_at: str = Field(..., description="发布时间")
+
+    error_message: Optional[str] = Field(
+        default=None,
+        description="错误信息（失败时有值）",
+    )
+
+    article_url: Optional[str] = Field(
+        default=None,
+        description="文章链接（成功时有值）",
+    )
+
+    class Config:
+        from_attributes = True
+
+
+class WechatPublishHistoryResponse(BaseModel):
+    """微信发布历史响应。"""
+
+    total: int = Field(..., description="总记录数")
+
+    items: list[WechatPublishHistoryItem] = Field(
+        default=[],
+        description="发布历史列表",
+    )
+
+
+# ============================================================
+# 群发相关 Schema
+# ============================================================
+
+
+class WechatMassSendRequest(BaseModel):
+    """微信群发请求。"""
+
+    publish_id: str = Field(
+        ...,
+        description="发布任务 ID（从发布接口返回）",
+    )
+
+    send_ignore_reprint: bool = Field(
+        default=False,
+        description="是否为原创文章（true=原创，false=转载）",
+    )
+
+
+class WechatMassSendResponse(BaseModel):
+    """微信群发响应。"""
+
+    success: bool = Field(..., description="是否成功")
+
+    message: str = Field(..., description="提示信息")
+
+    msg_id: Optional[str] = Field(
+        default=None,
+        description="群发消息 ID",
+    )
+
+    msg_data_id: Optional[str] = Field(
+        default=None,
+        description="消息数据 ID",
+    )
+
+
+# ============================================================
 # 配置相关 Schema
 # ============================================================
 

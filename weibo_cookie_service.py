@@ -51,8 +51,15 @@ def get_cookie_async(callback):
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
 
         print(f"[信息] 启动 {browser_type.upper()} 浏览器...")
+
+        # 使用本地驱动而不是自动下载
+        import os
+        from selenium.webdriver.edge.service import Service
+        driver_path = os.path.join(os.path.dirname(__file__), "drivers", "msedgedriver.exe")
+
         if browser_type == "edge":
-            driver = webdriver.Edge(options=options)
+            service = Service(executable_path=driver_path)
+            driver = webdriver.Edge(service=service, options=options)
         else:
             driver = webdriver.Chrome(options=options)
 

@@ -35,6 +35,10 @@ from app.schemas.wechat import (
     WechatConfigCreate,
     WechatConfigResponse,
     WechatConfigUpdate,
+    WechatMassSendRequest,
+    WechatMassSendResponse,
+    WechatPublishHistoryItem,
+    WechatPublishHistoryResponse,
     WechatPublishRequest,
     WechatPublishResponse,
     WechatPublishStatusResponse,
@@ -174,7 +178,8 @@ async def publish_to_wechat(
 
         # 更新发布日志为"已提交"（微信发布是异步的，真正成功要轮询状态）
         publish_log.status = PublishStatus.PENDING  # 等待微信审核/发布
-        publish_log.remote_id = result["publish_id"]
+        # 保存 publish_id 和 draft_media_id（用逗号分隔）
+        publish_log.remote_id = f"{result['publish_id']},{result['draft_media_id']}"
         await db.commit()
 
         logger.info(
@@ -244,11 +249,18 @@ async def get_publish_status(
 
         status_data = await client.get_publish_status(publish_id)
 
+        # 提取文章URL（如果发布成功）
+        article_url = None
+        if status_data.get("publish_status") == 0 and "article_detail" in status_data:
+            items = status_data["article_detail"].get("item", [])
+            if items and len(items) > 0:
+                article_url = items[0].get("article_url")
+
         return WechatPublishStatusResponse(
             publish_id=publish_id,
             publish_status=status_data.get("publish_status", 1),
             article_id=status_data.get("article_id"),
-            article_url=status_data.get("article_url"),
+            article_url=article_url,
             fail_reason=status_data.get("fail_reason"),
         )
 
@@ -257,6 +269,223 @@ async def get_publish_status(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=e.message,
+        )
+
+
+@router.get(
+    "/articles/{article_id}/publish-history",
+    response_model=WechatPublishHistoryResponse,
+    summary="获取文章的微信发布历史",
+)
+async def get_publish_history(
+    article_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    membership: Annotated[TenantMember, Depends(require_role(Role.VIEWER))],
+) -> WechatPublishHistoryResponse:
+    """获取指定文章的微信发布历史。
+
+    返回该文章所有的微信发布记录，包括：
+    - 发布时间
+    - 发布状态（成功/失败/处理中）
+    - 文章链接（成功时）
+    - 错误信息（失败时）
+    """
+    tenant_id = membership.tenant_id
+
+    # 验证文章存在且属于当前租户
+    stmt = select(Article).where(
+        Article.id == article_id,
+        Article.tenant_id == tenant_id,
+    )
+    result = await db.execute(stmt)
+    article = result.scalar_one_or_none()
+
+    if not article:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文章不存在",
+        )
+
+    # 获取微信公众号配置（只要测试号的）
+    stmt = select(PublishTarget).where(
+        PublishTarget.tenant_id == tenant_id,
+        PublishTarget.type == PublishTargetType.WECHAT_MP,
+        PublishTarget.is_active == True,  # noqa: E712
+    )
+    result = await db.execute(stmt)
+    wechat_configs = result.scalars().all()
+
+    if not wechat_configs:
+        return WechatPublishHistoryResponse(total=0, items=[])
+
+    # 获取测试号的配置ID
+    test_config_id = None
+    for config in wechat_configs:
+        if config.config.get("app_id") == "wx9fd8b428a5485411":
+            test_config_id = config.id
+            break
+
+    if not test_config_id:
+        return WechatPublishHistoryResponse(total=0, items=[])
+
+    # 查询发布历史
+    stmt = (
+        select(PublishLog)
+        .where(
+            PublishLog.article_id == article_id,
+            PublishLog.target_id == test_config_id,
+        )
+        .order_by(PublishLog.published_at.desc())
+    )
+    result = await db.execute(stmt)
+    logs = result.scalars().all()
+
+    # 获取微信客户端（用于查询article_url）
+    config = None
+    for c in wechat_configs:
+        if c.id == test_config_id:
+            config = c
+            break
+
+    client = WechatMpClient(
+        db=db,
+        app_id=config.config["app_id"],
+        app_secret=config.config["app_secret"],
+    )
+
+    # 构建响应
+    items = []
+    for log in logs:
+        # 解析 publish_id（从 remote_id 中提取）
+        publish_id = None
+        if log.remote_id:
+            parts = log.remote_id.split(",", 1)
+            publish_id = parts[0]
+
+        # 如果状态是成功，尝试获取文章链接
+        article_url = None
+        if log.status == PublishStatus.SUCCESS and publish_id:
+            try:
+                status_data = await client.get_publish_status(publish_id)
+                if status_data.get("publish_status") == 0 and "article_detail" in status_data:
+                    items_data = status_data["article_detail"].get("item", [])
+                    if items_data and len(items_data) > 0:
+                        article_url = items_data[0].get("article_url")
+            except Exception as e:
+                logger.warning(f"Failed to get article_url for publish_id={publish_id}: {e}")
+
+        items.append(
+            WechatPublishHistoryItem(
+                id=log.id,
+                publish_id=publish_id,
+                status=log.status.value,
+                published_at=log.published_at.isoformat(),
+                error_message=log.error_message,
+                article_url=article_url,
+            )
+        )
+
+    return WechatPublishHistoryResponse(
+        total=len(items),
+        items=items,
+    )
+
+
+@router.post(
+    "/mass-send",
+    response_model=WechatMassSendResponse,
+    summary="群发图文消息给所有粉丝",
+)
+async def mass_send_message(
+    request: WechatMassSendRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    membership: Annotated[TenantMember, Depends(require_role(Role.MEMBER))],
+) -> WechatMassSendResponse:
+    """群发已发布的图文消息给所有粉丝。
+
+    注意事项：
+    1. 需要先调用发布接口获取 publish_id
+    2. 群发使用的是草稿 media_id（已自动从数据库获取）
+    3. 测试号每天只能群发1次，认证公众号每月4次
+    4. 群发后粉丝会立即收到推送消息
+    """
+    tenant_id = membership.tenant_id
+
+    # 获取微信公众号配置
+    wechat_config = await _get_wechat_config(db, tenant_id)
+    if not wechat_config:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="未配置微信公众号",
+        )
+
+    # 从数据库中查找 publish_log，获取 draft_media_id
+    # remote_id 格式: "publish_id,draft_media_id"
+    stmt = select(PublishLog).where(
+        PublishLog.target_id == wechat_config.id,
+    )
+    result = await db.execute(stmt)
+    all_logs = result.scalars().all()
+
+    # 查找匹配的publish_log（remote_id以publish_id开头）
+    publish_log = None
+    for log in all_logs:
+        if log.remote_id and log.remote_id.startswith(f"{request.publish_id},"):
+            publish_log = log
+            break
+
+    if not publish_log:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"未找到发布记录: {request.publish_id}",
+        )
+
+    if publish_log.status != PublishStatus.SUCCESS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"文章尚未发布成功，当前状态: {publish_log.status}",
+        )
+
+    # 解析 draft_media_id
+    parts = publish_log.remote_id.split(",", 1)
+    if len(parts) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="发布记录中未找到 draft_media_id，请重新发布文章",
+        )
+
+    draft_media_id = parts[1]
+
+    try:
+        client = WechatMpClient(
+            db=db,
+            app_id=wechat_config.config["app_id"],
+            app_secret=wechat_config.config["app_secret"],
+        )
+
+        # 执行群发
+        mass_result = await client.send_mass_message(
+            media_id=draft_media_id,
+            send_ignore_reprint=request.send_ignore_reprint,
+        )
+
+        logger.info(
+            f"Mass send success: tenant={tenant_id}, "
+            f"publish_id={request.publish_id}, msg_id={mass_result.get('msg_id')}"
+        )
+
+        return WechatMassSendResponse(
+            success=True,
+            message="群发成功，粉丝即将收到推送消息",
+            msg_id=str(mass_result.get("msg_id")),
+            msg_data_id=str(mass_result.get("msg_data_id")),
+        )
+
+    except WechatMpError as e:
+        logger.error(f"Mass send failed: {e.message}")
+        return WechatMassSendResponse(
+            success=False,
+            message=f"群发失败: {e.message}",
         )
 
 

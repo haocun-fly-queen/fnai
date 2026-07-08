@@ -1,6 +1,6 @@
 """微博发布服务（阶段 5 — 微博对接）。
 
-直接复用 E:\发文章\weibo_cookie_publisher.py 中已调通的核心逻辑。
+直接复用 E:\\发文章\\weibo_cookie_publisher.py 中已调通的核心逻辑。
 只做薄封装：接参 → 调原函数 → 返回结果。
 """
 

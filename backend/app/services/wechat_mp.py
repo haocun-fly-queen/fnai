@@ -67,6 +67,7 @@ class WechatMpClient:
     DRAFT_ADD_URL = "https://api.weixin.qq.com/cgi-bin/draft/add"
     PUBLISH_URL = "https://api.weixin.qq.com/cgi-bin/freepublish/submit"
     PUBLISH_STATUS_URL = "https://api.weixin.qq.com/cgi-bin/freepublish/get"
+    MASS_SEND_URL = "https://api.weixin.qq.com/cgi-bin/message/mass/sendall"
     UPLOAD_IMAGE_URL = "https://api.weixin.qq.com/cgi-bin/media/uploadimg"
     UPLOAD_MATERIAL_URL = "https://api.weixin.qq.com/cgi-bin/material/add_material"
 
@@ -200,6 +201,93 @@ class WechatMpClient:
                     wx_errcode=data.get("errcode"),
                 )
 
+            return data
+
+    async def send_mass_message(
+        self,
+        media_id: str,
+        send_ignore_reprint: bool = False,
+    ) -> dict[str, Any]:
+        """群发图文消息给所有粉丝。
+
+        注意：
+        1. 使用 draft_media_id（草稿素材ID，从 publish_article 返回）
+        2. 群发给所有粉丝（认证号可用标签筛选）
+        3. 测试号每天只能群发1次，认证号每月4次
+        4. 群发后粉丝会收到推送消息
+        5. 微信群发使用的是草稿的 media_id，不是已发布文章的 article_id
+
+        Args:
+            media_id: 草稿素材 ID（draft_media_id，从 publish_article 返回）
+            send_ignore_reprint: 是否转载（true=原创，false=转载）
+
+        Returns:
+            {
+                "msg_id": "群发消息ID",
+                "msg_data_id": "消息数据ID"
+            }
+
+        Raises:
+            WechatMpError: 群发失败
+        """
+        token = await self._get_token_with_retry()
+
+        # 构建群发请求体
+        # filter: {"is_to_all": true} 表示发给所有粉丝
+        # mpnews: 图文消息类型
+        payload = {
+            "filter": {
+                "is_to_all": True
+            },
+            "mpnews": {
+                "media_id": media_id
+            },
+            "msgtype": "mpnews",
+            "send_ignore_reprint": 1 if send_ignore_reprint else 0
+        }
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(
+                    f"{self.MASS_SEND_URL}?access_token={token}",
+                    json=payload,
+                )
+                data = response.json()
+            except httpx.TimeoutException:
+                raise WechatMpError(
+                    code="timeout",
+                    message="群发消息超时",
+                    retryable=True,
+                )
+            except httpx.NetworkError as e:
+                raise WechatMpError(
+                    code="network_error",
+                    message=f"网络错误: {e}",
+                    retryable=True,
+                )
+
+            if "errcode" in data and data["errcode"] != 0:
+                # 常见错误码
+                error_messages = {
+                    45008: "图文消息超过限制（单次最多8条）",
+                    45009: "接口调用超过限制（测试号每天1次，认证号每月4次）",
+                    45015: "回复时间超过限制",
+                    45047: "客服接口下行条数超过上限",
+                    48001: "API功能未授权（需要认证或开通权限）",
+                    48002: "粉丝拒收（用户设置拒收该公众号消息）",
+                }
+
+                errcode = data.get("errcode")
+                errmsg = error_messages.get(errcode, data.get("errmsg", "未知错误"))
+
+                raise WechatMpError(
+                    code="mass_send_failed",
+                    message=f"群发失败: {errmsg}",
+                    wx_errcode=errcode,
+                    retryable=(errcode in self.RETRYABLE_WX_CODES),
+                )
+
+            logger.info(f"Mass message sent: msg_id={data.get('msg_id')}")
             return data
 
     async def upload_image(self, image_data: bytes, filename: str) -> str:

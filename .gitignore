@@ -66,3 +66,6 @@ playwright/.cache/
 *.sqlite3
 postgres-data/
 redis-data/
+
+# ----- 本地驱动（浏览器 WebDriver，本机专用，勿提交）-----
+drivers/
