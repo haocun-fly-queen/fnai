@@ -57,6 +57,11 @@ class WechatPublishRequest(BaseModel):
         description="是否仅粉丝可评论",
     )
 
+    push_to_followers: bool = Field(
+        default=False,
+        description="是否同时群发推送给粉丝（注意：有每日次数限制）",
+    )
+
 
 class WechatPublishResponse(BaseModel):
     """微信发布响应。"""

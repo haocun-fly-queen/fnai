@@ -76,6 +76,7 @@ class PublishResponse(BaseModel):
     message: str
     remote_id: str | None = Field(None, description="远程文章 ID（如 WP post_id）")
     log_id: UUID | None = Field(None, description="发布日志 ID")
+    action: str | None = Field(None, description="操作类型：created（新建）/ updated（更新）")
 
 
 # === 发布日志查询 ===
@@ -107,6 +108,7 @@ class PublishLogSimpleResponse(BaseModel):
     is_published: bool = Field(..., description="是否已发布成功")
     published_at: datetime = Field(..., description="发布时间（包括失败的尝试）")
     target_name: str = Field(..., description="发布目标名称（如'微信公众号'）")
+    target_id: UUID | None = Field(None, description="发布目标 ID")
 
     class Config:
         from_attributes = True

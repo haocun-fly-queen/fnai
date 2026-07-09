@@ -187,9 +187,30 @@ async def publish_to_wechat(
             f"publish_id={result['publish_id']}, status=pending"
         )
 
+        # 6. 可选：群发推送给粉丝
+        mass_send_msg = None
+        if request.push_to_followers:
+            try:
+                mass_result = await client.send_mass_message(
+                    media_id=result["draft_media_id"],
+                )
+                mass_send_msg = f"群发成功，msg_id={mass_result.get('msg_id', '')}"
+                logger.info(
+                    f"Mass send triggered: article_id={article_id}, "
+                    f"msg_id={mass_result.get('msg_id')}"
+                )
+            except WechatMpError as e:
+                # 群发失败不影响发布结果，只记录日志
+                mass_send_msg = f"群发失败: {e.message}"
+                logger.warning(f"Mass send failed: {e.message}")
+
+        message = "已提交发布任务，请稍后查询状态（微信审核中）"
+        if mass_send_msg:
+            message += f"；{mass_send_msg}"
+
         return WechatPublishResponse(
             success=True,
-            message="已提交发布任务，请稍后查询状态（微信审核中）",
+            message=message,
             publish_id=result["publish_id"],
             draft_media_id=result["draft_media_id"],
         )

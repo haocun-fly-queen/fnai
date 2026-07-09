@@ -11,6 +11,7 @@ import Link from '@tiptap/extension-link';
 import BaseImage from '@tiptap/extension-image';
 import { TextStyle } from '@tiptap/extension-text-style';
 import { Color } from '@tiptap/extension-color';
+import { FontSize } from '@/extensions/FontSize';
 
 // 扩展 Image，增加 style 属性支持（用于对齐等内联样式）
 const Image = BaseImage.extend({
@@ -330,6 +331,31 @@ function EditorToolbar({
 
       <Sep />
 
+      {/* === 字体大小 === */}
+      <select
+        className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700"
+        value={editor.getAttributes('textStyle').fontSize || ''}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v) editor.chain().focus().setFontSize(v).run();
+          else editor.chain().focus().unsetFontSize().run();
+        }}
+      >
+        <option value="">字号</option>
+        <option value="12px">12px</option>
+        <option value="14px">14px</option>
+        <option value="16px">16px</option>
+        <option value="18px">18px</option>
+        <option value="20px">20px</option>
+        <option value="24px">24px</option>
+        <option value="28px">28px</option>
+        <option value="32px">32px</option>
+        <option value="36px">36px</option>
+        <option value="48px">48px</option>
+      </select>
+
+      <Sep />
+
       {/* === 第二组：文字样式 === */}
       <ToolBtn
         active={editor.isActive('bold')}
@@ -516,6 +542,7 @@ export function ArticleEditorPage(): JSX.Element {
       Image.configure({ allowBase64: true, inline: false }),
       TextStyle,
       Color,
+      FontSize,
     ],
     content: '',
     editorProps: {

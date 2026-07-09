@@ -212,8 +212,9 @@ async def publish_article(
 
     # 4. 根据目标类型调用相应的发布逻辑
     try:
+        action = "created"
         if target.type == PublishTargetType.WORDPRESS:
-            remote_id = await _publish_to_wordpress(article, target, data.status)
+            remote_id, action = await _publish_to_wordpress(article, target, data.status, db)
         elif target.type == PublishTargetType.WEBHOOK:
             remote_id = await _publish_to_webhook(article, target)
         else:
@@ -224,11 +225,13 @@ async def publish_article(
         log.remote_id = str(remote_id)
         await db.commit()
 
+        msg = "更新成功" if action == "updated" else "发布成功"
         return PublishResponse(
             success=True,
-            message="发布成功",
+            message=msg,
             remote_id=str(remote_id),
             log_id=log.id,
+            action=action,
         )
 
     except Exception as e:
@@ -245,8 +248,17 @@ async def publish_article(
         )
 
 
-async def _publish_to_wordpress(article: Article, target: PublishTarget, status: str) -> int:
-    """发布到 WordPress。"""
+async def _publish_to_wordpress(
+    article: Article, target: PublishTarget, status: str, db: AsyncSession
+) -> tuple[int, str]:
+    """发布到 WordPress。
+
+    如果该文章已发布到同一目标（有成功的 remote_id），则更新远程文章；
+    否则创建新文章。
+
+    Returns:
+        (post_id, action) — action 为 "created" 或 "updated"
+    """
     config = target.config
     required_keys = ["site_url", "username", "app_password"]
     missing = [k for k in required_keys if k not in config]
@@ -259,14 +271,38 @@ async def _publish_to_wordpress(article: Article, target: PublishTarget, status:
         app_password=config["app_password"],
     )
 
-    # TODO: 如果 remote_id 已存在，应该调用 update_post 而不是 create_post
-    # 这里简化处理：每次都创建新文章
-    post_id = await client.create_post(
-        title=article.title or "未命名文章",
-        content=article.content,
-        status=status,
+    # 查询是否已发布到同一目标
+    existing_stmt = (
+        select(PublishLog)
+        .where(
+            PublishLog.article_id == article.id,
+            PublishLog.target_id == target.id,
+            PublishLog.status == PublishStatus.SUCCESS,
+            PublishLog.remote_id.isnot(None),
+        )
+        .order_by(PublishLog.published_at.desc())
+        .limit(1)
     )
-    return post_id
+    result = await db.execute(existing_stmt)
+    prev_log = result.scalars().first()
+
+    if prev_log and prev_log.remote_id:
+        # 已发布过 → 更新远程文章
+        post_id = await client.update_post(
+            post_id=int(prev_log.remote_id),
+            title=article.title or "未命名文章",
+            content=article.content,
+            status=status,
+        )
+        return post_id, "updated"
+    else:
+        # 首次发布 → 创建新文章
+        post_id = await client.create_post(
+            title=article.title or "未命名文章",
+            content=article.content,
+            status=status,
+        )
+        return post_id, "created"
 
 
 async def _publish_to_webhook(article: Article, target: PublishTarget) -> str:
@@ -365,6 +401,7 @@ async def get_publish_logs(
             is_published=(log.status == PublishStatus.SUCCESS),
             published_at=log.published_at,
             target_name=target.name,
+            target_id=target.id,
         )
         for log, target in rows
     ]

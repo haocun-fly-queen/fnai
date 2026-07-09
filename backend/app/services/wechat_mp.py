@@ -522,7 +522,7 @@ class WechatMpClient:
         # 构建文章数据
         article = {
             "title": title,
-            "content": self._sanitize_html(content),
+            "content": self._sanitize_html(self._convert_headings_for_wechat(content)),
             "author": author or "FNAI",
             "digest": digest[:120] if digest else "",
             "need_open_comment": 1 if need_open_comment else 0,
@@ -662,6 +662,62 @@ class WechatMpClient:
 
         # 移除危险的 href（javascript:）
         html = re.sub(r'href="javascript:[^"]*"', 'href="#"', html)
+
+        return html
+
+    def _convert_headings_for_wechat(self, html: str) -> str:
+        """将微信不支持的 HTML 标签转换为带内联样式的兼容格式。
+
+        微信公众号只支持 p/span/section/br/strong/em/a/img 等少数标签，
+        需要把 h1-h6、ul/ol/li、blockquote、hr 等全部转成带内联样式的 <p>。
+        """
+        # 1. h1-h6 → 带字号的 <p>
+        heading_styles = {
+            "1": "font-size: 22px; font-weight: bold; margin-bottom: 16px;",
+            "2": "font-size: 18px; font-weight: bold; margin-bottom: 12px;",
+            "3": "font-size: 16px; font-weight: bold; margin-bottom: 8px;",
+            "4": "font-size: 15px; font-weight: bold; margin-bottom: 6px;",
+            "5": "font-size: 14px; font-weight: bold; margin-bottom: 4px;",
+            "6": "font-size: 13px; font-weight: bold; margin-bottom: 4px;",
+        }
+
+        def _replace_heading(match: re.Match) -> str:
+            level = match.group(1)
+            content = match.group(2)
+            style = heading_styles.get(level, heading_styles["6"])
+            return f'<p style="{style}">{content}</p>'
+
+        html = re.sub(r"<h([1-6])[^>]*>(.*?)</h\1>", _replace_heading, html, flags=re.DOTALL | re.IGNORECASE)
+
+        # 2. <li> → 带圆点的 <p>（去掉外层 ul/ol 先）
+        html = re.sub(r"</?ol[^>]*>", "", html, flags=re.IGNORECASE)
+        html = re.sub(r"</?ul[^>]*>", "", html, flags=re.IGNORECASE)
+        html = re.sub(
+            r"<li[^>]*>(.*?)</li>",
+            lambda m: f'<p style="padding-left: 16px; margin-bottom: 4px;">• {m.group(1)}</p>',
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+
+        # 3. <blockquote> → 带左边框的 <p>
+        def _replace_quote(match: re.Match) -> str:
+            content = match.group(1).strip()
+            # 去掉内部的 <p> 标签，保留内容
+            content = re.sub(r"</?p[^>]*>", "", content)
+            return (
+                f'<p style="border-left: 3px solid #ccc; padding-left: 12px; '
+                f'color: #666; margin: 12px 0;">{content}</p>'
+            )
+
+        html = re.sub(r"<blockquote[^>]*>(.*?)</blockquote>", _replace_quote, html, flags=re.DOTALL | re.IGNORECASE)
+
+        # 4. <hr> → 居中分隔线
+        html = re.sub(
+            r"<hr\s*/?>",
+            '<p style="text-align: center; color: #999; margin: 16px 0;">· · ·</p>',
+            html,
+            flags=re.IGNORECASE,
+        )
 
         return html
 

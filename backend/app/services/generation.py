@@ -43,6 +43,8 @@ from app.models import (
     ModelCallLog,
     PromptTemplate,
 )
+import markdown as md_lib
+
 from app.services import embedding, llm
 from app.services.article import _resolve_template, _count_words
 from app.services.knowledge import search_chunks
@@ -159,8 +161,15 @@ async def generate_article(
             db, task=task, article=article, tpl=tpl,
             full_content=article.content,
         )
-        article.content = polished
-        article.word_count = _count_words(polished)
+        # 剥掉 LLM 可能包裹的 ```markdown ... ``` 代码块
+        cleaned = polished.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:markdown)?\s*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+            cleaned = cleaned.strip()
+
+        article.word_count = _count_words(cleaned)  # 在 Markdown 阶段统计，避免 HTML 标签干扰
+        article.content = md_lib.markdown(cleaned, extensions=["extra", "nl2br"])
         await db.commit()
 
         # 4) 全部成功

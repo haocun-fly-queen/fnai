@@ -39,6 +39,7 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
   const [selectedWechatId, setSelectedWechatId] = useState('');
   const [wechatAuthor, setWechatAuthor] = useState('');
   const [wechatDigest, setWechatDigest] = useState('');
+  const [pushToFollowers, setPushToFollowers] = useState(false);
 
   // 微博相关状态
   const [weiboConfigs, setWeiboConfigs] = useState<WeiboConfig[]>([]);
@@ -146,6 +147,7 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
         config_id: selectedWechatId,
         author: wechatAuthor || undefined,
         digest: wechatDigest || undefined,
+        push_to_followers: pushToFollowers,
       });
 
       if (result.success) {
@@ -497,6 +499,25 @@ export function PublishDialog({ articleId, onClose, onSuccess }: PublishDialogPr
                         {wechatDigest.length}/120
                       </p>
                     </div>
+
+                    {/* 群发推送给粉丝 */}
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="pushToFollowers"
+                        className="h-4 w-4 rounded border-slate-300 text-green-600 focus:ring-green-500"
+                        checked={pushToFollowers}
+                        onChange={(e) => setPushToFollowers(e.target.checked)}
+                      />
+                      <label htmlFor="pushToFollowers" className="text-sm text-slate-700">
+                        同时推送给粉丝（群发）
+                      </label>
+                    </div>
+                    {pushToFollowers && (
+                      <p className="rounded bg-amber-50 px-3 py-2 text-xs text-amber-600">
+                        ⚠️ 群发有次数限制（认证服务号每月 4 次，订阅号每天 1 次），请谨慎使用
+                      </p>
+                    )}
 
                     {/* 复制内容显示 */}
                     {copyContent && (

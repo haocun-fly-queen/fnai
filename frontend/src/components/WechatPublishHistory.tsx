@@ -157,7 +157,7 @@ export const WechatPublishHistory: React.FC<WechatPublishHistoryProps> = ({ arti
         </table>
       </div>
 
-      <style jsx>{`
+      <style>{`
         .wechat-publish-history {
           margin-top: 2rem;
           padding: 1.5rem;

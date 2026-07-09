@@ -65,6 +65,7 @@ export interface WechatPublishRequest {
   thumb_media_id?: string;
   need_open_comment?: boolean;
   only_fans_can_comment?: boolean;
+  push_to_followers?: boolean; // 是否同时群发推送给粉丝
 }
 
 export interface WechatPublishResponse {
@@ -119,12 +120,14 @@ export interface PublishResponse {
   message: string;
   remote_id?: string;
   log_id?: string;
+  action?: 'created' | 'updated';
 }
 
 export interface PublishLog {
   is_published: boolean;
   published_at: string;
   target_name: string;
+  target_id?: string;
 }
 
 // ============================================================
