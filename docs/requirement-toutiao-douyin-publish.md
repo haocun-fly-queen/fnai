@@ -209,20 +209,110 @@ ALTER TYPE publishtargettype ADD VALUE IF NOT EXISTS 'DOUYIN';
 
 ---
 
-## 十、开发上手步骤
+## 十、环境搭建（必须先完成）
 
-1. 读 `docs/HANDOFF.md` 了解项目全局
-2. 读 `services/wechat_mp.py` + `api/v1/endpoints/wechat_mp.py` 理解发布模块的代码模式
-3. 本地环境跑通（`docker compose -f docker-compose.dev.yml up -d`）
-4. 在 [头条号开放平台](https://developer.toutiao.com) 和 [抖音开放平台](https://open.douyin.com) 注册应用，获取 API 文档
-5. 按照第三节文件清单逐个实现
-6. 每完成一个平台跑一次 E2E 测试
+### 10.1 获取源码
+
+```bash
+# 方式一：从 Gitee 克隆
+git clone https://gitee.com/fengneng_2/geo.git
+cd geo
+git checkout feat/phase3-celery-and-search
+
+# 方式二：从同事处获取压缩包（公司网络可能连不上 Gitee）
+# 解压 fnai-monorepo.zip 到本地
+```
+
+### 10.2 前置依赖
+
+| 工具 | 版本要求 | 用途 |
+|------|---------|------|
+| Docker Desktop | 最新版（WSL2 后端） | 运行所有服务 |
+| Node.js | 22+ | 前端构建（可选，Docker 内会装） |
+| Python | 3.12+ | 后端（可选，Docker 内会装） |
+| Git | 任意 | 版本管理 |
+
+### 10.3 一键启动本地环境
+
+```bash
+# 1. 进入 infra 目录
+cd fnai-monorepo/infra
+
+# 2. 启动开发栈（backend + frontend + celery-worker，复用外部 postgres + redis）
+docker compose -f docker-compose.dev.yml up -d --build
+
+# 3. 创建数据库表（首次启动需要）
+docker exec fnai-backend-dev python -m app.db.init_db
+
+# 4. 验证服务正常
+curl http://localhost:8000/api/v1/health    # → {"status":"ok"}
+curl http://localhost:3000/                  # → HTML 页面
+```
+
+### 10.4 端口说明
+
+| 端口 | 服务 | 访问地址 |
+|------|------|---------|
+| 3000 | 前端（nginx） | http://localhost:3000 |
+| 8000 | 后端（FastAPI） | http://localhost:8000/docs （API 文档） |
+| 5432 | PostgreSQL + pgvector | 外部容器共享 |
+| 6379 | Redis | 外部容器共享 |
+
+### 10.5 常用调试命令
+
+```bash
+# 查看后端实时日志
+docker logs -f fnai-backend-dev
+
+# 进入后端容器执行 Python
+docker exec -it fnai-backend-dev python
+
+# 查看数据库
+docker exec fnai-postgres psql -U fnai -d fnai_dev
+# SQL: \dt 列出表 / \d <table> 看表结构 / SELECT * FROM <table> LIMIT 5;
+
+# 前端类型检查
+cd fnai-monorepo/frontend && npx tsc --noEmit
+
+# 后端 lint
+cd fnai-monorepo/backend && ruff check .
+```
 
 ---
 
-## 十一、参考资料
+## 十一、开发上手步骤
+
+### 第一天：熟悉代码
+
+1. 读 `docs/HANDOFF.md` 了解项目全局（5 分钟看懂）
+2. 读 `docs/requirement-toutiao-douyin-publish.md`（本文档）了解需求
+3. 重点读以下参考文件，理解发布模块的代码模式：
+   - `backend/app/services/wechat_mp.py` — 微信 API 客户端（OAuth + 重试 + 错误处理）
+   - `backend/app/api/v1/endpoints/wechat_mp.py` — 微信端点（路由 + 权限 + 错误翻译）
+   - `backend/app/schemas/wechat.py` — 微信 Schema（请求/响应定义）
+   - `frontend/src/components/PublishDialog.tsx` — 前端发布对话框（Tab 切换 + 表单）
+   - `frontend/src/pages/WechatConfigPage.tsx` — 微信配置管理页
+4. 在浏览器打开 http://localhost:3000 注册账号，体验一遍完整的"创建知识库 → 生成文章 → 发布"流程
+
+### 第二天起：开始开发
+
+5. 在 [头条号开放平台](https://developer.toutiao.com) 和 [抖音开放平台](https://open.douyin.com) 注册开发者应用，获取 `client_key` + `client_secret`
+6. 阅读平台 API 文档，重点关注：
+   - OAuth 2.0 授权流程
+   - 内容发布接口
+   - 素材上传接口
+   - 状态查询接口
+7. 按照本文档第三节"文件清单"逐个实现：
+   - 先后端（Model → Schema → Service → Endpoint）
+   - 再前端（API 函数 → 发布对话框 → 配置管理页）
+8. 每完成一个平台的功能，跑一次完整 E2E 测试验证
+
+---
+
+## 十二、参考资料
 
 - [头条号开放平台](https://developer.toutiao.com)
 - [抖音开放平台](https://open.douyin.com)
 - [字节跳动统一 OAuth 文档](https://open.douyin.com/platform/resource?doc_id=)
 - 项目现有发布模块代码（`services/`、`api/v1/endpoints/`）
+- 项目交接文档：`docs/HANDOFF.md`
