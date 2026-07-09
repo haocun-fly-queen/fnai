@@ -2,8 +2,6 @@
 
 > 版本：V1
 > 编写日期：2026-07-09
-> 优先级：P1
-> 预估工期：各 1 周（共 2 周）
 
 ---
 
@@ -282,10 +280,8 @@ cd fnai-monorepo/backend && ruff check .
 
 ## 十一、开发上手步骤
 
-### 第一天：熟悉代码
-
-1. 读 `docs/HANDOFF.md` 了解项目全局（5 分钟看懂）
-2. 读 `docs/requirement-toutiao-douyin-publish.md`（本文档）了解需求
+1. 读 `docs/HANDOFF.md` 了解项目全局
+2. 读本文档了解需求
 3. 重点读以下参考文件，理解发布模块的代码模式：
    - `backend/app/services/wechat_mp.py` — 微信 API 客户端（OAuth + 重试 + 错误处理）
    - `backend/app/api/v1/endpoints/wechat_mp.py` — 微信端点（路由 + 权限 + 错误翻译）
@@ -293,18 +289,9 @@ cd fnai-monorepo/backend && ruff check .
    - `frontend/src/components/PublishDialog.tsx` — 前端发布对话框（Tab 切换 + 表单）
    - `frontend/src/pages/WechatConfigPage.tsx` — 微信配置管理页
 4. 在浏览器打开 http://localhost:3000 注册账号，体验一遍完整的"创建知识库 → 生成文章 → 发布"流程
-
-### 第二天起：开始开发
-
 5. 在 [头条号开放平台](https://developer.toutiao.com) 和 [抖音开放平台](https://open.douyin.com) 注册开发者应用，获取 `client_key` + `client_secret`
-6. 阅读平台 API 文档，重点关注：
-   - OAuth 2.0 授权流程
-   - 内容发布接口
-   - 素材上传接口
-   - 状态查询接口
-7. 按照本文档第三节"文件清单"逐个实现：
-   - 先后端（Model → Schema → Service → Endpoint）
-   - 再前端（API 函数 → 发布对话框 → 配置管理页）
+6. 阅读平台 API 文档，重点关注：OAuth 2.0 授权流程、内容发布接口、素材上传接口、状态查询接口
+7. 按照本文档第三节"文件清单"逐个实现（先后端 Model → Schema → Service → Endpoint，再前端 API → 发布对话框 → 配置管理页）
 8. 每完成一个平台的功能，跑一次完整 E2E 测试验证
 
 ---
