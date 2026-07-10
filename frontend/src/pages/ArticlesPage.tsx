@@ -1,5 +1,5 @@
 // 文章列表页 —— 文章管理 + 创建 + 批量生成。
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   listArticles,
@@ -13,6 +13,17 @@ import {
 } from '@/lib/article-api';
 import { listKbs, listDocuments, type KnowledgeBase, type DocumentItem } from '@/lib/knowledge-api';
 import { api } from '@/lib/api';
+
+/** 每篇批量文章的扩展状态（含独立 KB + 文件选择） */
+interface BatchRow {
+  title: string;
+  topic: string;
+  knowledge_base_id: string;
+  source_document_ids: string[];
+  /** 该行选中 KB 后加载的文档列表缓存 */
+  docs: DocumentItem[];
+  docsLoading: boolean;
+}
 
 export function ArticlesPage(): JSX.Element {
   const navigate = useNavigate();
@@ -30,19 +41,18 @@ export function ArticlesPage(): JSX.Element {
 
   // 批量模式
   const [batchMode, setBatchMode] = useState(false);
-  const [batchItems, setBatchItems] = useState<BatchGenerateItem[]>([
-    { title: '', topic: '' },
-  ]);
+  const [batchRows, setBatchRows] = useState<BatchRow[]>([makeEmptyRow()]);
   const [batchTplCode, setBatchTplCode] = useState('blog');
-  const [batchKbId, setBatchKbId] = useState('');
-  const [batchDocIds, setBatchDocIds] = useState<string[]>([]);
-  const [docs, setDocs] = useState<DocumentItem[]>([]);
   const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [batchProgress, setBatchProgress] = useState<{
     articleIds: string[];
     statuses: Record<string, string>;
   } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  function makeEmptyRow(): BatchRow {
+    return { title: '', topic: '', knowledge_base_id: '', source_document_ids: [], docs: [], docsLoading: false };
+  }
 
   async function refresh(): Promise<void> {
     try {
@@ -59,28 +69,9 @@ export function ArticlesPage(): JSX.Element {
     }
   }
 
-  // 加载 KB 下的文档列表（文件多选用）
-  const loadDocs = useCallback(async (kb: string) => {
-    if (!kb) {
-      setDocs([]);
-      return;
-    }
-    try {
-      const res = await listDocuments(kb);
-      setDocs(res.items);
-    } catch {
-      setDocs([]);
-    }
-  }, []);
-
   useEffect(() => {
     void refresh();
   }, []);
-
-  // 切换 KB 时加载文档列表
-  useEffect(() => {
-    void loadDocs(batchMode ? batchKbId : kbId);
-  }, [batchMode, batchKbId, kbId, loadDocs]);
 
   // 轮询批量生成进度
   useEffect(() => {
@@ -102,7 +93,6 @@ export function ArticlesPage(): JSX.Element {
         setBatchProgress((prev) =>
           prev ? { ...prev, statuses: { ...prev.statuses, ...results } } : null,
         );
-        // 全部完成则停止轮询
         const allDone = batchProgress.articleIds.every(
           (id) => results[id] === 'completed' || results[id] === 'failed',
         );
@@ -147,18 +137,19 @@ export function ArticlesPage(): JSX.Element {
 
   // 批量提交
   async function onBatchSubmit(): Promise<void> {
-    const valid = batchItems.filter((it) => it.title && it.topic);
+    const valid = batchRows.filter((r) => r.title && r.topic);
     if (valid.length === 0) {
       setMsg('请至少填一篇文章的标题和主题');
       return;
     }
     setBatchSubmitting(true);
     try {
-      const items: BatchGenerateItem[] = valid.map((it) => ({
-        ...it,
+      const items: BatchGenerateItem[] = valid.map((r) => ({
+        title: r.title,
+        topic: r.topic,
         template_code: batchTplCode,
-        knowledge_base_id: batchKbId || undefined,
-        source_document_ids: batchDocIds.length > 0 ? batchDocIds : undefined,
+        knowledge_base_id: r.knowledge_base_id || undefined,
+        source_document_ids: r.source_document_ids.length > 0 ? r.source_document_ids : undefined,
       }));
       const res = await batchGenerate(items);
       setMsg(`已提交 ${res.article_ids.length} 篇生成任务，正在轮询进度...`);
@@ -173,24 +164,44 @@ export function ArticlesPage(): JSX.Element {
     }
   }
 
-  function updateBatchItem(idx: number, field: 'title' | 'topic', val: string): void {
-    setBatchItems((prev) => prev.map((it, i) => (i === idx ? { ...it, [field]: val } : it)));
+  // 更新某行的字段
+  function updateRow(idx: number, patch: Partial<BatchRow>): void {
+    setBatchRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
   }
 
-  function addBatchItem(): void {
-    if (batchItems.length >= 20) return;
-    setBatchItems((prev) => [...prev, { title: '', topic: '' }]);
+  // 切换某行的知识库 → 加载该 KB 的文档列表
+  async function onRowKbChange(idx: number, newKbId: string): Promise<void> {
+    updateRow(idx, { knowledge_base_id: newKbId, source_document_ids: [], docs: [], docsLoading: true });
+    if (!newKbId) return;
+    try {
+      const res = await listDocuments(newKbId);
+      updateRow(idx, { docs: res.items, docsLoading: false });
+    } catch {
+      updateRow(idx, { docs: [], docsLoading: false });
+    }
   }
 
-  function removeBatchItem(idx: number): void {
-    if (batchItems.length <= 1) return;
-    setBatchItems((prev) => prev.filter((_, i) => i !== idx));
-  }
-
-  function toggleDoc(docId: string): void {
-    setBatchDocIds((prev) =>
-      prev.includes(docId) ? prev.filter((id) => id !== docId) : [...prev, docId],
+  // 切换某行的文件勾选
+  function toggleRowDoc(idx: number, docId: string): void {
+    setBatchRows((prev) =>
+      prev.map((r, i) => {
+        if (i !== idx) return r;
+        const ids = r.source_document_ids.includes(docId)
+          ? r.source_document_ids.filter((id) => id !== docId)
+          : [...r.source_document_ids, docId];
+        return { ...r, source_document_ids: ids };
+      }),
     );
+  }
+
+  function addBatchRow(): void {
+    if (batchRows.length >= 20) return;
+    setBatchRows((prev) => [...prev, makeEmptyRow()]);
+  }
+
+  function removeBatchRow(idx: number): void {
+    if (batchRows.length <= 1) return;
+    setBatchRows((prev) => prev.filter((_, i) => i !== idx));
   }
 
   async function onDelete(id: string): Promise<void> {
@@ -326,91 +337,91 @@ export function ArticlesPage(): JSX.Element {
                     ))}
                   </select>
                 </div>
-                <div>
-                  <label className="mb-1 block text-xs text-slate-500">知识库（全局，可选）</label>
-                  <select
-                    className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
-                    value={batchKbId}
-                    onChange={(e) => {
-                      setBatchKbId(e.target.value);
-                      setBatchDocIds([]);
-                    }}
-                  >
-                    <option value="">不使用知识库</option>
-                    {kbs.map((kb) => (
-                      <option key={kb.id} value={kb.id}>
-                        {kb.name}（{kb.document_count} 文档）
-                      </option>
-                    ))}
-                  </select>
-                </div>
 
-                {/* 文件多选 */}
-                {batchKbId && docs.length > 0 && (
-                  <div>
-                    <label className="mb-1 block text-xs text-slate-500">
-                      指定文件（可选，不选则检索全部）
-                    </label>
-                    <div className="max-h-32 space-y-1 overflow-y-auto rounded border border-slate-200 p-2">
-                      {docs
-                        .filter((d) => d.status === 'ready')
-                        .map((d) => (
-                          <label key={d.id} className="flex items-center gap-2 text-xs">
-                            <input
-                              type="checkbox"
-                              checked={batchDocIds.includes(d.id)}
-                              onChange={() => toggleDoc(d.id)}
-                            />
-                            <span className="truncate">{d.filename}</span>
-                            <span className="text-slate-400">({d.chunk_count} chunks)</span>
-                          </label>
-                        ))}
-                    </div>
-                    {batchDocIds.length > 0 && (
-                      <p className="mt-1 text-xs text-blue-600">已选 {batchDocIds.length} 个文件</p>
-                    )}
-                  </div>
-                )}
-
-                {/* 文章列表 */}
+                {/* 文章列表（每篇独立配置 KB + 文件） */}
                 <div>
                   <div className="mb-1 flex items-center justify-between">
-                    <label className="text-xs text-slate-500">文章列表（{batchItems.length}/20）</label>
+                    <label className="text-xs text-slate-500">文章列表（{batchRows.length}/20）</label>
                     <button
                       className="text-xs text-blue-600 hover:underline disabled:opacity-50"
-                      onClick={addBatchItem}
-                      disabled={batchItems.length >= 20}
+                      onClick={addBatchRow}
+                      disabled={batchRows.length >= 20}
                     >
                       + 添加一篇
                     </button>
                   </div>
-                  <div className="max-h-64 space-y-2 overflow-y-auto">
-                    {batchItems.map((it, idx) => (
-                      <div key={idx} className="rounded border border-slate-200 p-2">
-                        <div className="mb-1 flex items-center justify-between">
+                  <div className="max-h-[28rem] space-y-3 overflow-y-auto">
+                    {batchRows.map((row, idx) => (
+                      <div key={idx} className="rounded border border-slate-200 p-3">
+                        <div className="mb-2 flex items-center justify-between">
                           <span className="text-xs font-medium text-slate-500">#{idx + 1}</span>
-                          {batchItems.length > 1 && (
+                          {batchRows.length > 1 && (
                             <button
                               className="text-xs text-red-400 hover:text-red-600"
-                              onClick={() => removeBatchItem(idx)}
+                              onClick={() => removeBatchRow(idx)}
                             >
-                              ✕
+                              ✕ 删除
                             </button>
                           )}
                         </div>
                         <input
-                          className="mb-1 w-full rounded border border-slate-300 px-2 py-1 text-xs"
+                          className="mb-2 w-full rounded border border-slate-300 px-2 py-1 text-xs"
                           placeholder="标题"
-                          value={it.title}
-                          onChange={(e) => updateBatchItem(idx, 'title', e.target.value)}
+                          value={row.title}
+                          onChange={(e) => updateRow(idx, { title: e.target.value })}
                         />
                         <textarea
-                          className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
+                          className="mb-2 w-full rounded border border-slate-300 px-2 py-1 text-xs"
                           rows={2}
                           placeholder="主题"
-                          value={it.topic}
-                          onChange={(e) => updateBatchItem(idx, 'topic', e.target.value)}
+                          value={row.topic}
+                          onChange={(e) => updateRow(idx, { topic: e.target.value })}
                         />
+                        {/* 每篇独立选知识库 */}
+                        <select
+                          className="mb-2 w-full rounded border border-slate-300 px-2 py-1 text-xs"
+                          value={row.knowledge_base_id}
+                          onChange={(e) => void onRowKbChange(idx, e.target.value)}
+                        >
+                          <option value="">不使用知识库</option>
+                          {kbs.map((kb) => (
+                            <option key={kb.id} value={kb.id}>
+                              {kb.name}（{kb.document_count} 文档）
+                            </option>
+                          ))}
+                        </select>
+                        {/* 文件多选 */}
+                        {row.knowledge_base_id && (
+                          <div>
+                            {row.docsLoading ? (
+                              <p className="text-xs text-slate-400">加载文件中...</p>
+                            ) : row.docs.length > 0 ? (
+                              <>
+                                <div className="max-h-24 space-y-1 overflow-y-auto rounded border border-slate-200 p-2">
+                                  {row.docs
+                                    .filter((d) => d.status === 'ready')
+                                    .map((d) => (
+                                      <label key={d.id} className="flex items-center gap-2 text-xs">
+                                        <input
+                                          type="checkbox"
+                                          checked={row.source_document_ids.includes(d.id)}
+                                          onChange={() => toggleRowDoc(idx, d.id)}
+                                        />
+                                        <span className="truncate">{d.filename}</span>
+                                        <span className="text-slate-400">({d.chunk_count})</span>
+                                      </label>
+                                    ))}
+                                </div>
+                                {row.source_document_ids.length > 0 && (
+                                  <p className="mt-1 text-xs text-blue-600">已选 {row.source_document_ids.length} 个文件</p>
+                                )}
+                                <p className="text-xs text-slate-400">不选则检索该知识库全部文件</p>
+                              </>
+                            ) : (
+                              <p className="text-xs text-slate-400">该知识库暂无已就绪的文件</p>
+                            )}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -421,7 +432,7 @@ export function ArticlesPage(): JSX.Element {
                   onClick={() => void onBatchSubmit()}
                   disabled={batchSubmitting}
                 >
-                  {batchSubmitting ? '提交中...' : `提交 ${batchItems.filter((it) => it.title && it.topic).length} 篇生成`}
+                  {batchSubmitting ? '提交中...' : `提交 ${batchRows.filter((r) => r.title && r.topic).length} 篇生成`}
                 </button>
               </div>
             </>
