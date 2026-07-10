@@ -107,6 +107,20 @@ class PromptTemplate(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # 第四阶段：质量检查 + 润色
     quality_prompt: Mapped[str] = mapped_column(Text, nullable=False)
 
+    # ---------- 结构化输出 Prompt（Phase 2 新增）----------
+
+    # 表格类型小节的 prompt（大纲中 content_type="table" 时使用）
+    table_section_prompt: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default="",
+        comment="表格类型小节的 prompt（结构化输出）",
+    )
+
+    # 列表类型小节的 prompt（大纲中 content_type="list" 时使用）
+    list_section_prompt: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default="",
+        comment="列表类型小节的 prompt（结构化输出）",
+    )
+
     # ---------- 配置 ----------
 
     # 默认目标字数（用户可在生成时覆盖）

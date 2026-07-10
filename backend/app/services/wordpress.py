@@ -4,12 +4,17 @@ WordPress REST API v2 文档：https://developer.wordpress.org/rest-api/referenc
 
 认证方式：Application Password（WordPress 5.6+）
 https://make.wordpress.org/core/2020/11/05/application-passwords-integration-guide/
+
+安全特性：
+    - URL 验证，防止 SSRF 攻击（不允许内网地址）
 """
 
 import logging
 from typing import Any
 
 import httpx
+
+from app.core.url_validator import URLValidationError, validate_wordpress_url
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +38,14 @@ class WordPressClient:
             site_url: WordPress 站点 URL（如 https://example.com，不要带 /wp-json）
             username: WordPress 用户名
             app_password: Application Password（格式：xxxx xxxx xxxx xxxx，空格会自动去除）
+
+        Raises:
+            URLValidationError: URL 不安全（内网地址、无效格式等）
         """
-        self.site_url = site_url.rstrip("/")
+        # 验证 URL 安全性（防止 SSRF）
+        validated_url = validate_wordpress_url(site_url.rstrip("/"))
+
+        self.site_url = validated_url
         self.api_base = f"{self.site_url}/wp-json/wp/v2"
         self.username = username
         self.app_password = app_password.replace(" ", "")  # 去除空格

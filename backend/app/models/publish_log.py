@@ -11,7 +11,7 @@ from datetime import datetime
 from enum import Enum as PyEnum
 
 from sqlalchemy import Column, DateTime, Enum, ForeignKey, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -48,6 +48,7 @@ class PublishLog(Base):
     error_message = Column(Text, nullable=True, comment="失败原因")
     published_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    metrics = Column(JSONB, nullable=True, comment="发布效果统计: 阅读量/点赞数等")
 
     # 关系
     article = relationship("Article", back_populates="publish_logs")

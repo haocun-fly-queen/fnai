@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_active_tenant_id, get_current_user, get_db, require_role
+from app.core.config_crypto import decrypt_config, encrypt_config
 from app.models.article import Article
 from app.models.membership import Role, TenantMember
 from app.models.publish_log import PublishLog, PublishStatus
@@ -127,16 +128,18 @@ async def publish_to_wechat(
 
     # 4. 调用微信 API 发布
     try:
+        # 解密敏感字段（app_secret）
+        wc_config = decrypt_config(wechat_config.type, wechat_config.config)
         client = WechatMpClient(
             db=db,
-            app_id=wechat_config.config["app_id"],
-            app_secret=wechat_config.config["app_secret"],
+            app_id=wc_config["app_id"],
+            app_secret=wc_config["app_secret"],
         )
 
         # 使用请求中的作者，或配置中的默认作者
         author = (
             request.author
-            or wechat_config.config.get("author", "")
+            or wc_config.get("author", "")
             or "FNAI"
         )
 
@@ -262,10 +265,11 @@ async def get_publish_status(
         )
 
     try:
+        wc_config = decrypt_config(wechat_config.type, wechat_config.config)
         client = WechatMpClient(
             db=db,
-            app_id=wechat_config.config["app_id"],
-            app_secret=wechat_config.config["app_secret"],
+            app_id=wc_config["app_id"],
+            app_secret=wc_config["app_secret"],
         )
 
         status_data = await client.get_publish_status(publish_id)
@@ -368,10 +372,11 @@ async def get_publish_history(
             config = c
             break
 
+    wc_config = decrypt_config(config.type, config.config)
     client = WechatMpClient(
         db=db,
-        app_id=config.config["app_id"],
-        app_secret=config.config["app_secret"],
+        app_id=wc_config["app_id"],
+        app_secret=wc_config["app_secret"],
     )
 
     # 构建响应
@@ -478,10 +483,11 @@ async def mass_send_message(
     draft_media_id = parts[1]
 
     try:
+        wc_config = decrypt_config(wechat_config.type, wechat_config.config)
         client = WechatMpClient(
             db=db,
-            app_id=wechat_config.config["app_id"],
-            app_secret=wechat_config.config["app_secret"],
+            app_id=wc_config["app_id"],
+            app_secret=wc_config["app_secret"],
         )
 
         # 执行群发
@@ -548,18 +554,21 @@ async def create_wechat_config(
                 detail=f"该 App ID ({request.app_id}) 已存在配置",
             )
 
-    # 创建配置
+    # 创建配置（加密 app_secret 后存储）
     config = PublishTarget(
         tenant_id=tenant_id,
         name=request.name,
         type=PublishTargetType.WECHAT_MP,  # 微信公众号专用类型
-        config={
-            "app_id": request.app_id,
-            "app_secret": request.app_secret,
-            "author": request.author or "",
-            "thumb_media_id": request.thumb_media_id or "",
-            "platform": "wechat_mp",  # 保留标识，向后兼容
-        },
+        config=encrypt_config(
+            PublishTargetType.WECHAT_MP,
+            {
+                "app_id": request.app_id,
+                "app_secret": request.app_secret,
+                "author": request.author or "",
+                "thumb_media_id": request.thumb_media_id or "",
+                "platform": "wechat_mp",  # 保留标识，向后兼容
+            },
+        ),
         is_active=True,
     )
     db.add(config)
@@ -646,7 +655,7 @@ async def update_wechat_config(
     new_config = dict(config.config)  # 复制一份，避免原地修改
     config_changed = False
     if request.app_secret is not None:
-        new_config["app_secret"] = request.app_secret
+        new_config["app_secret"] = request.app_secret  # 明文，稍后统一加密
         config_changed = True
     if request.author is not None:
         new_config["author"] = request.author
@@ -655,7 +664,8 @@ async def update_wechat_config(
         new_config["thumb_media_id"] = request.thumb_media_id
         config_changed = True
     if config_changed:
-        config.config = new_config  # 整体赋值，触发 SQLAlchemy 变更检测
+        # 加密敏感字段后整体赋值（encrypt_config 幂等，未变更的已加密值不会重复加密）
+        config.config = encrypt_config(config.type, new_config)
 
     await db.commit()
     await db.refresh(config)

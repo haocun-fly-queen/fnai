@@ -24,3 +24,5 @@ markdownify>=0.13.0
 python-multipart>=0.0.9
 tenacity>=9.0.0
 python-slugify>=8.0.0
+pillow>=10.0.0
+cryptography>=43.0.0

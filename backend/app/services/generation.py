@@ -28,6 +28,7 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -50,6 +51,41 @@ from app.services.article import _resolve_template, _count_words
 from app.services.knowledge import search_chunks
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# 结构化输出 schema（Step 10）
+# ============================================================
+
+OUTLINE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "sections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "heading": {"type": "string"},
+                    "content_type": {
+                        "type": "string",
+                        "enum": ["text", "table", "list"],
+                    },
+                    "table_columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "key_points": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["heading", "content_type"],
+            },
+        },
+    },
+    "required": ["title", "sections"],
+}
 
 
 # ============================================================
@@ -226,6 +262,7 @@ async def _stage_outline(
         kb_id=article.knowledge_base_id,
         query=article.topic,
         top_k=5,
+        document_ids=article.source_document_ids,
     )
 
     user_prompt = tpl.outline_prompt.format(
@@ -236,9 +273,10 @@ async def _stage_outline(
 
     result = await _call_llm(
         db, task=task, purpose="outline",
-        system_prompt="你是 FNAI 平台的内容生成助手，严格按照用户要求输出。",
+        system_prompt="你是 FNAI 平台的内容生成助手，严格按照用户要求输出。请以 JSON 格式返回大纲。",
         user_prompt=user_prompt,
         temperature=0.6,  # 大纲略保守
+        response_format={"type": "json_object"},
     )
 
     # 解析 JSON（LLM 偶尔会带前后说明文字，做一次容错提取）
@@ -272,6 +310,8 @@ async def _stage_sections(
     for sec in sections:
         heading = sec.get("heading", "")
         points = sec.get("key_points", [])
+        content_type = sec.get("content_type", "text")
+
         # 上下文：按"主题 + 小节标题"组合检索，更精准
         section_query = f"{article.topic} {heading}"
         context = await _retrieve_context(
@@ -279,14 +319,34 @@ async def _stage_sections(
             kb_id=article.knowledge_base_id,
             query=section_query,
             top_k=3,
+            document_ids=article.source_document_ids,
         )
 
-        user_prompt = tpl.section_prompt.format(
-            topic=article.topic,
-            section_title=heading,
-            section_points=" / ".join(points),
-            context=context or "（无相关参考资料）",
-        )
+        # 按 content_type 分发不同 prompt（Step 10 结构化输出）
+        if content_type == "table" and tpl.table_section_prompt:
+            columns = ", ".join(sec.get("table_columns", []))
+            user_prompt = tpl.table_section_prompt.format(
+                topic=article.topic,
+                section_title=heading,
+                columns=columns,
+                context=context or "（无相关参考资料）",
+            )
+        elif content_type == "list" and tpl.list_section_prompt:
+            key_points = ", ".join(points)
+            user_prompt = tpl.list_section_prompt.format(
+                topic=article.topic,
+                section_title=heading,
+                key_points=key_points,
+                context=context or "（无相关参考资料）",
+            )
+        else:
+            # 默认 text 类型，使用原有 section_prompt
+            user_prompt = tpl.section_prompt.format(
+                topic=article.topic,
+                section_title=heading,
+                section_points=" / ".join(points),
+                context=context or "（无相关参考资料）",
+            )
 
         result = await _call_llm(
             db, task=task, purpose="section",
@@ -372,6 +432,7 @@ async def _call_llm(
     user_prompt: str,
     temperature: float = 0.7,
     max_tokens: int | None = None,
+    response_format: dict | None = None,
 ) -> llm.LLMResult:
     """调一次 LLM，自动写 ModelCallLog 和更新 task 的累计 token / stage_logs。
 
@@ -384,6 +445,7 @@ async def _call_llm(
             user_prompt=user_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
+            response_format=response_format,
         )
         ok = True
         err: str | None = None
@@ -439,10 +501,12 @@ async def _retrieve_context(
     kb_id: UUID | None,
     query: str,
     top_k: int,
+    document_ids: list[UUID] | None = None,
 ) -> str:
     """RAG 检索：从指定 KB 拉 top-k 相关 chunks，拼成上下文文本。
 
     没绑 KB 时返回空串（生成纯模板内容，不带知识）。
+    传 document_ids 时只检索指定文件的 chunks（按文件选择生成）。
     """
     if kb_id is None:
         return ""
@@ -453,6 +517,7 @@ async def _retrieve_context(
             kb_id=kb_id,
             query=query,
             top_k=top_k,
+            document_ids=document_ids,
         )
     except Exception as exc:
         logger.warning("RAG 检索失败（跳过上下文）: %s", exc)

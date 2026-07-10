@@ -1,0 +1,123 @@
+version: "3.9"
+
+name: fnai-app
+
+# 一键部署包 - 包含所有必要服务（PostgreSQL、Redis、后端、Celery、前端）
+# 使用方法：双击 启动.bat 或运行 docker-compose up -d
+
+services:
+  # ========== 数据库 ==========
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: fnai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fnai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fnai}
+      POSTGRES_DB: ${POSTGRES_DB:-fnai_dev}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fnai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ========== 缓存与消息队列 ==========
+  redis:
+    image: redis:7-alpine
+    container_name: fnai-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ========== 后端 API ==========
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: fnai-backend
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DEBUG: ${DEBUG:-false}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-fnai}:${POSTGRES_PASSWORD:-fnai}@postgres:5432/${POSTGRES_DB:-fnai_dev}
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-fnai}:${POSTGRES_PASSWORD:-fnai}@postgres:5432/${POSTGRES_DB:-fnai_dev}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
+      JWT_SECRET: ${JWT_SECRET}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-v2}
+      OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-qwen-plus}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - storage-data:/tmp/fnai-storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  # ========== Celery 后台任务 ==========
+  celery:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: fnai-celery
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DEBUG: ${DEBUG:-false}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-fnai}:${POSTGRES_PASSWORD:-fnai}@postgres:5432/${POSTGRES_DB:-fnai_dev}
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-fnai}:${POSTGRES_PASSWORD:-fnai}@postgres:5432/${POSTGRES_DB:-fnai_dev}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      JWT_SECRET: ${JWT_SECRET}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-v2}
+      OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-qwen-plus}
+    volumes:
+      - storage-data:/tmp/fnai-storage
+    depends_on:
+      - backend
+      - redis
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
+
+  # ========== 前端 ==========
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: /api/v1
+    container_name: fnai-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+# 持久化存储（数据不会因容器删除而丢失）
+volumes:
+  postgres-data:
+  redis-data:
+  storage-data:

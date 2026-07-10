@@ -107,6 +107,30 @@ export async function listVersions(
   return r.data;
 }
 
+// ---- 批量生成（Phase 2 Step 12）----
+
+export interface BatchGenerateItem {
+  title: string;
+  topic: string;
+  template_code?: string;
+  knowledge_base_id?: string;
+  source_document_ids?: string[];
+  target_word_count?: number;
+}
+
+export interface BatchGenerateResponse {
+  article_ids: string[];
+  message: string;
+}
+
+// 批量生成（1-20 篇，异步投递 Celery）
+export async function batchGenerate(
+  items: BatchGenerateItem[],
+): Promise<BatchGenerateResponse> {
+  const r = await api.post('/articles/batch-generate', { items });
+  return r.data;
+}
+
 // 打版本快照
 export async function saveVersion(
   articleId: string,

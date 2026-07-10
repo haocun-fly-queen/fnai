@@ -25,6 +25,8 @@ from uuid import UUID
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.html_image_handler import HtmlImageHandler
+from app.services.image_processor import ImageProcessor
 from app.services.wechat_token import WechatTokenError, WechatTokenManager
 
 # 默认封面图路径（微信草稿接口必填 thumb_media_id）
@@ -88,6 +90,7 @@ class WechatMpClient:
         self.app_id = app_id
         self.app_secret = app_secret
         self.token_manager = WechatTokenManager(db)
+        self.image_handler = HtmlImageHandler(ImageProcessor(max_size_mb=10))
 
     async def publish_article(
         self,
@@ -116,7 +119,9 @@ class WechatMpClient:
             {
                 "publish_id": "发布任务 ID",
                 "draft_media_id": "草稿素材 ID",
-                "thumb_media_id": "使用的封面图素材 ID"
+                "thumb_media_id": "使用的封面图素材 ID",
+                "images_processed": 处理的图片数量,
+                "images_succeeded": 成功上传的图片数量
             }
 
         Raises:
@@ -134,11 +139,22 @@ class WechatMpClient:
         # 3. 获取 access_token（带重试）
         token = await self._get_token_with_retry()
 
-        # 4. 创建草稿（带重试）
+        # 4. 处理正文图片（下载外链/base64 图片，上传到微信素材库）
+        processed_content, image_results = await self._process_content_images(content, token)
+        images_succeeded = sum(1 for r in image_results if r["status"] == "success")
+
+        if image_results:
+            logger.info(
+                f"Processed {len(image_results)} images, "
+                f"{images_succeeded} succeeded, "
+                f"{len(image_results) - images_succeeded} failed"
+            )
+
+        # 5. 创建草稿（带重试）
         draft_media_id = await self._create_draft_with_retry(
             token=token,
             title=title,
-            content=content,
+            content=processed_content,  # 使用处理后的内容
             author=author,
             digest=digest,
             thumb_media_id=effective_thumb,
@@ -146,13 +162,15 @@ class WechatMpClient:
             only_fans_can_comment=only_fans_can_comment,
         )
 
-        # 5. 发布草稿（带重试）
+        # 6. 发布草稿（带重试）
         publish_id = await self._submit_publish_with_retry(token, draft_media_id)
 
         return {
             "publish_id": publish_id,
             "draft_media_id": draft_media_id,
             "thumb_media_id": effective_thumb,
+            "images_processed": len(image_results),
+            "images_succeeded": images_succeeded,
         }
 
     async def get_publish_status(self, publish_id: str) -> dict[str, Any]:
@@ -746,3 +764,46 @@ class WechatMpClient:
             logger.warning(
                 f"Content too long ({len(content)} chars), may be truncated by WeChat"
             )
+
+    async def _process_content_images(
+        self,
+        content: str,
+        token: str
+    ) -> tuple[str, list[dict]]:
+        """处理文章正文中的图片（下载并上传到微信）。
+
+        Args:
+            content: HTML 内容
+            token: 微信 access_token
+
+        Returns:
+            (处理后的 HTML, 图片处理结果列表)
+
+        说明：
+            - 外链图片：下载 → 优化 → 上传微信 → 替换 URL
+            - Base64 图片：解码 → 优化 → 上传微信 → 替换 URL
+            - 已有微信图片：跳过
+            - 失败图片：保留原 src（降级策略）
+        """
+        # 统计图片数量
+        image_count = self.image_handler.count_images(content)
+        if image_count == 0:
+            logger.debug("No images found in content")
+            return content, []
+
+        logger.info(f"Found {image_count} images in content, processing...")
+
+        # 定义上传回调函数
+        async def upload_to_wechat(image_data: bytes, filename: str) -> str:
+            """上传图片到微信素材库。"""
+            return await self.upload_image(image_data, filename)
+
+        # 处理所有图片
+        processed_html, results = await self.image_handler.process_images(
+            html=content,
+            upload_callback=upload_to_wechat,
+            on_error="keep",  # 失败时保留原图（降级策略）
+        )
+
+        return processed_html, results
+

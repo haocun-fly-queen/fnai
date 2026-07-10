@@ -111,6 +111,7 @@ def chat(
     model: str | None = None,
     temperature: float = 0.7,
     max_tokens: int | None = None,
+    response_format: dict | None = None,
 ) -> LLMResult:
     """调一次 chat completion。
 
@@ -120,6 +121,8 @@ def chat(
         model: 模型名，默认从 settings.openai_chat_model 读（qwen-plus）
         temperature: 创意度 0-1，0=确定性最高，1=最发散
         max_tokens: 输出上限。None = 模型默认
+        response_format: 输出格式约束，透传给 API。
+            示例: {"type": "json_object"} 强制 JSON 输出
 
     Returns:
         LLMResult 含 content 和用量信息
@@ -133,6 +136,7 @@ def chat(
         model=model or settings.openai_chat_model,
         temperature=temperature,
         max_tokens=max_tokens,
+        response_format=response_format,
     )
 
 
@@ -151,6 +155,7 @@ def _chat_with_retry(
     model: str,
     temperature: float,
     max_tokens: int | None,
+    response_format: dict | None = None,
 ) -> LLMResult:
     """真正调 API 的内层函数（带 tenacity 自动重试 429/超时）。"""
     client = _get_client()
@@ -166,6 +171,8 @@ def _chat_with_retry(
         }
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if response_format is not None:
+            kwargs["response_format"] = response_format
         resp = client.chat.completions.create(**kwargs)
     except (RateLimitError, APIConnectionError, APITimeoutError):
         raise  # tenacity 接手重试

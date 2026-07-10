@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_active_tenant_id, get_current_user, get_db, require_role
+from app.core.config_crypto import decrypt_config, encrypt_config
 from app.models.article import Article
 from app.models.membership import Role, TenantMember
 from app.models.publish_log import PublishLog, PublishStatus
@@ -99,7 +100,9 @@ async def publish_to_weibo(
             detail="未配置微博账号，请先在微博配置页面添加",
         )
 
-    cookie = weibo_config.config.get("cookie", "")
+    # 解密敏感字段（cookie）
+    wb_config = decrypt_config(weibo_config.type, weibo_config.config)
+    cookie = wb_config.get("cookie", "")
     if not cookie:
         raise HTTPException(status_code=400, detail="微博 Cookie 为空，请重新配置")
 
@@ -117,7 +120,7 @@ async def publish_to_weibo(
         content = f"{article.title}\n\n{text}"
 
     # 追加尾部内容（话题标签等）
-    suffix = request.suffix or weibo_config.config.get("default_suffix", "")
+    suffix = request.suffix or wb_config.get("default_suffix", "")
     if suffix:
         content = f"{content}\n\n{suffix}"
 
@@ -266,16 +269,19 @@ async def create_weibo_config(
     """创建微博配置。每个租户可以有多个微博配置。"""
     tenant_id = membership.tenant_id
 
-    # 创建配置
+    # 创建配置（加密 cookie 后存储）
     config = PublishTarget(
         tenant_id=tenant_id,
         name=request.name,
         type=PublishTargetType.WEIBO,
-        config={
-            "cookie": request.cookie,
-            "default_suffix": request.default_suffix or "",
-            "platform": "weibo",
-        },
+        config=encrypt_config(
+            PublishTargetType.WEIBO,
+            {
+                "cookie": request.cookie,
+                "default_suffix": request.default_suffix or "",
+                "platform": "weibo",
+            },
+        ),
         is_active=True,
     )
     db.add(config)
@@ -312,18 +318,22 @@ async def list_weibo_configs(
     result = await db.execute(stmt)
     configs = list(result.scalars().all())
 
-    return [
-        WeiboConfigResponse(
-            id=c.id,
-            name=c.name,
-            cookie_preview=mask_cookie(c.config.get("cookie", "")),
-            default_suffix=c.config.get("default_suffix"),
-            is_active=c.is_active,
-            created_at=c.created_at.isoformat(),
-            updated_at=c.updated_at.isoformat(),
+    result_items = []
+    for c in configs:
+        # 解密后再生成脱敏预览
+        decrypted = decrypt_config(c.type, c.config)
+        result_items.append(
+            WeiboConfigResponse(
+                id=c.id,
+                name=c.name,
+                cookie_preview=mask_cookie(decrypted.get("cookie", "")),
+                default_suffix=decrypted.get("default_suffix"),
+                is_active=c.is_active,
+                created_at=c.created_at.isoformat(),
+                updated_at=c.updated_at.isoformat(),
+            )
         )
-        for c in configs
-    ]
+    return result_items
 
 
 @router.put(
@@ -356,19 +366,22 @@ async def update_weibo_config(
 
     new_config = dict(config.config)
     if request.cookie is not None:
-        new_config["cookie"] = request.cookie
+        new_config["cookie"] = request.cookie  # 明文，稍后统一加密
     if request.default_suffix is not None:
         new_config["default_suffix"] = request.default_suffix
-    config.config = new_config
+    # 加密敏感字段后整体赋值（encrypt_config 幂等）
+    config.config = encrypt_config(config.type, new_config)
 
     await db.commit()
     await db.refresh(config)
 
+    # 响应中的 cookie 预览：解密后再脱敏
+    decrypted = decrypt_config(config.type, config.config)
     return WeiboConfigResponse(
         id=config.id,
         name=config.name,
-        cookie_preview=mask_cookie(config.config.get("cookie", "")),
-        default_suffix=config.config.get("default_suffix"),
+        cookie_preview=mask_cookie(decrypted.get("cookie", "")),
+        default_suffix=decrypted.get("default_suffix"),
         is_active=config.is_active,
         created_at=config.created_at.isoformat(),
         updated_at=config.updated_at.isoformat(),

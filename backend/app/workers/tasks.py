@@ -21,6 +21,7 @@
 #     这里对整个任务再加一层 Celery 重试（max_retries=2），兜底网络抖动。
 #   - 幂等：重复处理同一个 doc 时先删旧 chunks，避免 chunk_index 唯一约束冲突。
 
+import asyncio
 import logging
 from uuid import UUID
 
@@ -156,3 +157,225 @@ def _mark_failed(doc_uuid: UUID, message: str) -> None:
                 doc.error_message = message[:2000]
     except Exception:
         logger.exception("_mark_failed 写状态也失败了: doc_id=%s", doc_uuid)
+
+
+# ============================================================
+# 文章生成任务（Phase 2 — 批量生成）
+# ============================================================
+
+
+@shared_task(
+    name="app.workers.tasks.generate_article_task",
+    bind=True,
+    max_retries=0,
+)
+def generate_article_task(self, article_id: str, user_id: str) -> dict:  # noqa: ANN001
+    """后台生成一篇文章（四阶段 pipeline）。
+
+    由 batch-generate 端点投递，串行执行（worker prefetch=1）避免千问限流。
+
+    注意：generate_article 是 async 函数且需要 AsyncSession，
+    所以整个逻辑都包在 asyncio.run() 里，用 async session_scope()。
+
+    Args:
+        article_id: 文章 UUID（字符串）
+        user_id: 操作人 UUID（字符串）
+
+    Returns:
+        摘要 dict: {"article_id": ..., "status": "completed" / "failed"}
+    """
+    article_uuid = UUID(article_id)
+    logger.info("generate_article_task start: article_id=%s", article_id)
+
+    try:
+        result = asyncio.run(_generate_article_async(article_uuid, UUID(user_id)))
+        logger.info("generate_article_task done: article_id=%s status=%s", article_id, result.get("status"))
+        return result
+    except Exception as exc:
+        logger.exception("generate_article_task 失败: article_id=%s", article_id)
+        msg = getattr(exc, "message", None) or str(exc)
+        _mark_generation_failed(article_uuid, msg)
+        return {"article_id": article_id, "status": "failed", "error": msg}
+
+
+async def _generate_article_async(article_uuid: UUID, user_uuid: UUID) -> dict:
+    """异步生成文章（在 asyncio.run 里调用）。"""
+    from app.db.session import session_scope
+    from app.models import Article, ArticleStatus
+    from app.services.generation import generate_article
+
+    async with session_scope() as db:
+        article = await db.get(Article, article_uuid)
+        if article is None:
+            logger.warning("_generate_article_async: article 不存在 id=%s", article_uuid)
+            return {"article_id": str(article_uuid), "status": "not_found"}
+
+        tenant_id = article.tenant_id
+
+        await generate_article(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_uuid,
+            article=article,
+        )
+        await db.refresh(article)
+        status = article.status.value if hasattr(article.status, "value") else str(article.status)
+
+    return {"article_id": str(article_uuid), "status": status}
+
+
+def _mark_generation_failed(article_uuid: UUID, message: str) -> None:
+    """把文章标记为生成 FAILED（独立 session，保证状态落库）。"""
+    try:
+        with sync_session_scope() as db:
+            from app.models import Article, ArticleStatus
+
+            article = db.get(Article, article_uuid)
+            if article is not None:
+                article.status = ArticleStatus.FAILED
+                article.error_message = message[:2000]
+    except Exception:
+        logger.exception("_mark_generation_failed 也失败了: article_id=%s", article_uuid)
+
+
+# ============================================================
+# 定时发布任务（Phase 2 Step 13）
+# ============================================================
+
+
+@shared_task(
+    name="app.workers.tasks.publish_scheduled_articles",
+    bind=True,
+    max_retries=0,
+)
+def publish_scheduled_articles(self) -> dict:  # noqa: ANN001
+    """Celery Beat 定时任务：发布到期的定时文章。
+
+    查询条件：
+        - scheduled_at <= now（已到发布时间）
+        - is_published = False（未发布过）
+        - status = 'completed'（已生成完成）
+
+    对每篇文章，找到该租户的所有 active 发布目标，逐个发布。
+    发布成功后标记 is_published = True。
+
+    Returns:
+        {"checked": N, "published": M, "failed": K, "skipped": J}
+    """
+    logger.info("publish_scheduled_articles: 开始检查定时发布任务")
+
+    try:
+        result = asyncio.run(_publish_scheduled_async())
+        logger.info("publish_scheduled_articles: 完成 %s", result)
+        return result
+    except Exception as exc:
+        logger.exception("publish_scheduled_articles 失败: %s", exc)
+        return {"checked": 0, "published": 0, "failed": 0, "skipped": 0, "error": str(exc)}
+
+
+async def _publish_scheduled_async() -> dict:
+    """异步执行定时发布逻辑。"""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from app.db.session import session_scope
+    from app.models import Article, ArticleStatus
+    from app.models.publish_log import PublishLog, PublishStatus
+    from app.models.publish_target import PublishTarget
+    from app.services.publishers import get_publisher, PublishResult
+    from app.core.config_crypto import decrypt_config
+
+    stats = {"checked": 0, "published": 0, "failed": 0, "skipped": 0}
+    now = datetime.now(timezone.utc)
+
+    async with session_scope() as db:
+        # 查找到期的定时文章
+        stmt = select(Article).where(
+            Article.scheduled_at.isnot(None),
+            Article.scheduled_at <= now,
+            Article.is_published == False,  # noqa: E712
+            Article.status == ArticleStatus.COMPLETED,
+        )
+        result = await db.execute(stmt)
+        articles = result.scalars().all()
+        stats["checked"] = len(articles)
+
+        for article in articles:
+            # 查找该租户的 active 发布目标
+            target_stmt = select(PublishTarget).where(
+                PublishTarget.tenant_id == article.tenant_id,
+                PublishTarget.is_active == True,  # noqa: E712
+            )
+            target_result = await db.execute(target_stmt)
+            targets = target_result.scalars().all()
+
+            if not targets:
+                logger.warning(
+                    "定时发布: article %s 没有 active 发布目标，跳过",
+                    article.id,
+                )
+                stats["skipped"] += 1
+                continue
+
+            any_success = False
+            for target in targets:
+                try:
+                    publisher = get_publisher(target.type)
+                    config = decrypt_config(target.type, target.config)
+
+                    # 创建发布日志
+                    log = PublishLog(
+                        article_id=article.id,
+                        target_id=target.id,
+                        status=PublishStatus.PENDING,
+                    )
+                    db.add(log)
+                    await db.flush()
+
+                    result: PublishResult = await publisher.publish(
+                        article=article,
+                        config=config,
+                        options={"status": "publish"},
+                        db=db,
+                        target_id=target.id,
+                    )
+
+                    if result.success:
+                        log.status = PublishStatus.SUCCESS
+                        log.remote_id = result.remote_id
+                        any_success = True
+                        logger.info(
+                            "定时发布成功: article=%s target=%s",
+                            article.id, target.name,
+                        )
+                    else:
+                        log.status = PublishStatus.FAILED
+                        log.error_message = result.message
+                        logger.warning(
+                            "定时发布失败: article=%s target=%s err=%s",
+                            article.id, target.name, result.message,
+                        )
+                except Exception as e:
+                    logger.exception(
+                        "定时发布异常: article=%s target=%s",
+                        article.id, target.name,
+                    )
+                    # 记录失败日志
+                    log = PublishLog(
+                        article_id=article.id,
+                        target_id=target.id,
+                        status=PublishStatus.FAILED,
+                        error_message=str(e)[:2000],
+                    )
+                    db.add(log)
+
+            if any_success:
+                article.is_published = True
+                stats["published"] += 1
+            else:
+                stats["failed"] += 1
+
+        await db.commit()
+
+    return stats

@@ -15,7 +15,8 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import get_db_session
+from app.core.config_crypto import decrypt_config
+from app.db.session import session_scope
 from app.models.publish_log import PublishLog, PublishStatus
 from app.models.publish_target import PublishTarget, PublishTargetType
 from app.services.wechat_mp import WechatMpClient
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 async def update_pending_wechat_status():
     """更新所有待审核的微信发布状态"""
-    async with get_db_session() as db:
+    async with session_scope() as db:
         # 查询所有状态为 PENDING 的微信发布记录（最近 24 小时内）
         stmt = (
             select(PublishLog, PublishTarget)
@@ -53,11 +54,12 @@ async def update_pending_wechat_status():
                 continue
 
             try:
-                # 创建微信客户端
+                # 创建微信客户端（解密 app_secret）
+                wc_config = decrypt_config(target.type, target.config)
                 client = WechatMpClient(
                     db=db,
-                    app_id=target.config["app_id"],
-                    app_secret=target.config["app_secret"],
+                    app_id=wc_config["app_id"],
+                    app_secret=wc_config["app_secret"],
                 )
 
                 # 查询发布状态

@@ -12,6 +12,7 @@
 - 所有查询带 tenant_id 过滤
 """
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -75,6 +76,8 @@ async def create_article(
     template_code: str,
     knowledge_base_id: UUID | None,
     content: str,
+    source_document_ids: list[UUID] | None = None,
+    scheduled_at: datetime | None = None,
 ) -> Article:
     """创建一篇文章（手工/为生成准备占位）。
 
@@ -89,6 +92,13 @@ async def create_article(
             message=f"模板 '{template_code}' 不存在",
         )
 
+    # UUID 转字符串：JSONB 列不能直接存 UUID 对象
+    doc_ids_str = (
+        [str(uid) for uid in source_document_ids]
+        if source_document_ids
+        else None
+    )
+
     article = Article(
         tenant_id=tenant_id,
         knowledge_base_id=knowledge_base_id,
@@ -96,6 +106,8 @@ async def create_article(
         title=title,
         topic=topic,
         content=content,
+        source_document_ids=doc_ids_str,
+        scheduled_at=scheduled_at,
         status=ArticleStatus.DRAFT,
         word_count=_count_words(content),
         created_by=user_id,

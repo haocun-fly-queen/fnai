@@ -20,6 +20,8 @@ x-backend-env: &backend-env
   CELERY_RESULT_BACKEND: redis://fnai-redis:6379/2
   CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
   JWT_SECRET: dev-only-not-for-production-please-change-me
+  # 敏感数据加密密钥（dev 用，与 backend/.env 保持一致；生产环境务必换独立密钥）
+  ENCRYPTION_KEY: sZ7x_0xDp-Vnf5EWr87AVqIRAhEhiuie1rTnfHu4C40=
   OPENAI_API_KEY: "sk-ec0b4c97639f4ffabca8f4d03461ba01"
   OPENAI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   OPENAI_EMBEDDING_MODEL: "text-embedding-v2"

@@ -51,4 +51,11 @@ celery_app.conf.update(
     # ---- 单任务硬/软超时（防卡死）：软 9 分钟抛异常，硬 10 分钟杀进程 ----
     task_soft_time_limit=540,
     task_time_limit=600,
+    # ---- Celery Beat 定时任务（Phase 2 Step 13）----
+    beat_schedule={
+        "publish-scheduled-articles": {
+            "task": "app.workers.tasks.publish_scheduled_articles",
+            "schedule": 60.0,  # 每分钟检查一次定时发布
+        },
+    },
 )

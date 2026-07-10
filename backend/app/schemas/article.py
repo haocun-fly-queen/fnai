@@ -29,7 +29,15 @@ class ArticleCreate(BaseModel):
         description="模板代码（blog/product/news/seo/social）",
     )
     knowledge_base_id: UUID | None = Field(default=None, description="基于哪个 KB（可空）")
+    source_document_ids: list[UUID] | None = Field(
+        default=None,
+        description="选定的知识库文件 ID 列表；不传或空 = 用整个 KB",
+    )
     content: str = Field(default="", description="初始正文，留空让 AI 生成")
+    scheduled_at: datetime | None = Field(
+        default=None,
+        description="定时发布时间（ISO 8601）；不传 = 不定时",
+    )
 
 
 class ArticleUpdate(BaseModel):
@@ -50,12 +58,15 @@ class ArticleRead(BaseModel):
     topic: str
     template_code: str
     knowledge_base_id: UUID | None
+    source_document_ids: list[UUID] | None
     content: str
     outline: dict[str, Any] | None
     seo_meta: dict[str, Any] | None
     status: str
     word_count: int
     error_message: str | None
+    scheduled_at: datetime | None
+    is_published: bool
     created_at: datetime
     updated_at: datetime
 
@@ -70,8 +81,11 @@ class ArticleSummary(BaseModel):
     topic: str
     template_code: str
     knowledge_base_id: UUID | None
+    source_document_ids: list[UUID] | None
     status: str
     word_count: int
+    scheduled_at: datetime | None
+    is_published: bool
     created_at: datetime
     updated_at: datetime
 
@@ -143,3 +157,43 @@ class GenerationRequest(BaseModel):
         default=None, ge=200, le=10000,
         description="目标字数；不传用模板默认值",
     )
+    source_document_ids: list[UUID] | None = Field(
+        default=None,
+        description="选定的知识库文件 ID 列表；不传用文章创建时的值",
+    )
+
+
+# ============================================================
+# Batch Generate（批量生成）
+# ============================================================
+
+
+class BatchGenerateItem(BaseModel):
+    """批量生成中的一篇文章配置。"""
+
+    title: str = Field(min_length=1, max_length=300, description="文章标题")
+    topic: str = Field(min_length=1, max_length=500, description="主题")
+    template_code: str = Field(default="blog", max_length=50, description="模板代码")
+    knowledge_base_id: UUID | None = Field(default=None, description="基于哪个 KB")
+    source_document_ids: list[UUID] | None = Field(
+        default=None, description="选定的知识库文件 ID 列表",
+    )
+    target_word_count: int | None = Field(
+        default=None, ge=200, le=10000, description="目标字数",
+    )
+
+
+class BatchGenerateRequest(BaseModel):
+    """POST /articles/batch-generate 的请求体。"""
+
+    items: list[BatchGenerateItem] = Field(
+        min_length=1, max_length=20,
+        description="文章列表（1-20 篇）",
+    )
+
+
+class BatchGenerateResponse(BaseModel):
+    """POST /articles/batch-generate 的响应。"""
+
+    article_ids: list[UUID] = Field(description="已创建的文章 ID 列表")
+    message: str = Field(default="批量生成任务已提交，请轮询各文章状态")

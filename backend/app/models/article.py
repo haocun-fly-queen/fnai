@@ -38,10 +38,11 @@
 """
 
 import enum
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import Enum as SAEnum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Enum as SAEnum, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -173,6 +174,31 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=True,
     )
 
+    # ---------- Phase 2 新增字段 ----------
+
+    # 按文件选择生成：选定的知识库文件 ID 列表；null/空 = 用整个 KB
+    source_document_ids: Mapped[list | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="选定的知识库文件 ID 列表; null/空=用整个 KB",
+    )
+
+    # 定时发布：指定发布时间
+    scheduled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="定时发布时间; null=不定时",
+    )
+
+    # 定时发布标记：避免重复发布
+    is_published: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+        nullable=False,
+        comment="是否已通过定时任务发布",
+    )
+
     # ---------- 关系 ----------
 
     tenant: Mapped["Tenant"] = relationship()
@@ -204,6 +230,12 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index("ix_articles_tenant_created", "tenant_id", "created_at"),
         # 列表筛选：按租户 + 状态
         Index("ix_articles_tenant_status", "tenant_id", "status"),
+        # 定时发布查询：只索引"待发布"的行（partial index）
+        Index(
+            "ix_articles_scheduled",
+            "scheduled_at",
+            postgresql_where="scheduled_at IS NOT NULL AND is_published = FALSE",
+        ),
     )
 
     def __repr__(self) -> str:

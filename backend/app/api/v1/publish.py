@@ -21,6 +21,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_active_tenant_id, get_current_user, get_db
+from app.core.config_crypto import decrypt_config, encrypt_config, mask_config
+from app.core.url_validator import URLValidationError, validate_webhook_url, validate_wordpress_url
 from app.models.article import Article
 from app.models.publish_log import PublishLog, PublishStatus
 from app.models.publish_target import PublishTarget, PublishTargetType
@@ -34,6 +36,7 @@ from app.schemas.publish import (
     PublishTargetResponse,
     PublishTargetUpdate,
 )
+from app.services.publishers import PublishResult, get_publisher
 from app.services.wordpress import WordPressClient
 
 router = APIRouter()
@@ -45,24 +48,79 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 
+async def _validate_publish_target_config(target_type: PublishTargetType, config: dict) -> None:
+    """验证发布目标配置，包括 URL 安全性检查。
+
+    委托给对应平台的 Publisher 插件验证（plugin 化重构后）。
+
+    Args:
+        target_type: 发布目标类型（可能是 schema 枚举或 model 枚举）
+        config: 配置字典
+
+    Raises:
+        HTTPException: 配置无效或 URL 不安全
+    """
+    try:
+        # 统一转成 model 枚举（schema 用小写 wordpress，model 用大写 WORDPRESS）
+        model_type = _to_model_enum(target_type)
+        publisher = get_publisher(model_type)
+        await publisher.validate_config(config)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _to_model_enum(target_type: PublishTargetType) -> PublishTargetType:
+    """把 schema 枚举（小写）转成 model 枚举（大写）。"""
+    type_str = str(target_type.value) if hasattr(target_type, "value") else str(target_type)
+    # model 枚举是大写：WORDPRESS, WEBHOOK, WECHAT_MP, WEIBO
+    return PublishTargetType(type_str.upper())
+
+
+def _to_masked_response(target: PublishTarget) -> PublishTargetResponse:
+    """构造脱敏的发布目标响应（隐藏 config 中的敏感字段）。
+
+    注意：API 响应绝不返回明文/密文敏感字段，统一替换为 "******"。
+    """
+    return PublishTargetResponse(
+        id=target.id,
+        tenant_id=target.tenant_id,
+        name=target.name,
+        type=target.type,
+        config=mask_config(target.type, target.config),
+        is_active=target.is_active,
+        created_at=target.created_at,
+        updated_at=target.updated_at,
+    )
+
+
 @router.post("/publish-targets", response_model=PublishTargetResponse, status_code=201)
 async def create_publish_target(
     data: PublishTargetCreate,
     db: AsyncSession = Depends(get_db),
     tenant_id: UUID = Depends(get_active_tenant_id),
-) -> PublishTarget:
-    """创建发布目标（WordPress / Webhook）。"""
+) -> PublishTargetResponse:
+    """创建发布目标（WordPress / Webhook）。
+
+    安全特性：
+        - 验证 URL 格式和安全性（防止 SSRF 攻击）
+        - 拒绝内网地址（127.x, 10.x, 192.168.x, 172.16-31.x, 169.254.x）
+        - 敏感字段（app_password 等）加密后存储
+        - 响应中脱敏敏感字段
+    """
+    # 验证配置（包括 URL 安全性）
+    await _validate_publish_target_config(data.type, data.config)
+
     target = PublishTarget(
         tenant_id=tenant_id,
         name=data.name,
         type=data.type,
-        config=data.config,
+        config=encrypt_config(data.type, data.config),  # 加密敏感字段后存储
         is_active=data.is_active,
     )
     db.add(target)
     await db.commit()
     await db.refresh(target)
-    return target
+    return _to_masked_response(target)
 
 
 @router.get("/publish-targets", response_model=list[PublishTargetResponse])
@@ -70,11 +128,12 @@ async def list_publish_targets(
     db: AsyncSession = Depends(get_db),
     tenant_id: UUID = Depends(get_active_tenant_id),
     active_only: bool = True,
-) -> list[PublishTarget]:
+) -> list[PublishTargetResponse]:
     """列出发布目标（租户隔离）。
 
     注意：微信公众号（wechat_mp）有独立的发布入口和配置页，
     这里只返回 WordPress / Webhook 目标，避免污染通用发布下拉框。
+    响应中脱敏敏感字段。
     """
     stmt = select(PublishTarget).where(
         PublishTarget.tenant_id == tenant_id,
@@ -85,7 +144,7 @@ async def list_publish_targets(
     stmt = stmt.order_by(PublishTarget.created_at.desc())
 
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    return [_to_masked_response(t) for t in result.scalars().all()]
 
 
 @router.get("/publish-targets/{target_id}", response_model=PublishTargetResponse)
@@ -93,8 +152,8 @@ async def get_publish_target(
     target_id: UUID,
     db: AsyncSession = Depends(get_db),
     tenant_id: UUID = Depends(get_active_tenant_id),
-) -> PublishTarget:
-    """查看单个发布目标。"""
+) -> PublishTargetResponse:
+    """查看单个发布目标（响应脱敏）。"""
     stmt = select(PublishTarget).where(
         PublishTarget.id == target_id,
         PublishTarget.tenant_id == tenant_id,
@@ -105,7 +164,7 @@ async def get_publish_target(
     if not target:
         raise HTTPException(status_code=404, detail="发布目标不存在")
 
-    return target
+    return _to_masked_response(target)
 
 
 @router.put("/publish-targets/{target_id}", response_model=PublishTargetResponse)
@@ -114,8 +173,14 @@ async def update_publish_target(
     data: PublishTargetUpdate,
     db: AsyncSession = Depends(get_db),
     tenant_id: UUID = Depends(get_active_tenant_id),
-) -> PublishTarget:
-    """更新发布目标。"""
+) -> PublishTargetResponse:
+    """更新发布目标。
+
+    安全特性：
+        - 如果更新 config，重新验证 URL 安全性（防止 SSRF 攻击）
+        - 敏感字段加密后存储
+        - 响应中脱敏敏感字段
+    """
     stmt = select(PublishTarget).where(
         PublishTarget.id == target_id,
         PublishTarget.tenant_id == tenant_id,
@@ -130,13 +195,16 @@ async def update_publish_target(
     if data.name is not None:
         target.name = data.name
     if data.config is not None:
-        target.config = data.config
+        # 验证新配置的安全性
+        await _validate_publish_target_config(target.type, data.config)
+        # 加密敏感字段后整体赋值（触发 SQLAlchemy JSONB 变更检测）
+        target.config = encrypt_config(target.type, data.config)
     if data.is_active is not None:
         target.is_active = data.is_active
 
     await db.commit()
     await db.refresh(target)
-    return target
+    return _to_masked_response(target)
 
 
 @router.delete("/publish-targets/{target_id}", status_code=204)
@@ -210,29 +278,45 @@ async def publish_article(
     await db.commit()
     await db.refresh(log)
 
-    # 4. 根据目标类型调用相应的发布逻辑
+    # 4. 通过插件 registry 调用平台发布逻辑
     try:
-        action = "created"
-        if target.type == PublishTargetType.WORDPRESS:
-            remote_id, action = await _publish_to_wordpress(article, target, data.status, db)
-        elif target.type == PublishTargetType.WEBHOOK:
-            remote_id = await _publish_to_webhook(article, target)
-        else:
-            raise ValueError(f"不支持的发布目标类型: {target.type}")
+        publisher = get_publisher(target.type)
+        config = decrypt_config(target.type, target.config)
+        options = {"status": data.status}  # 平台通用选项
 
-        # 5. 更新日志为成功
-        log.status = PublishStatus.SUCCESS
-        log.remote_id = str(remote_id)
-        await db.commit()
-
-        msg = "更新成功" if action == "updated" else "发布成功"
-        return PublishResponse(
-            success=True,
-            message=msg,
-            remote_id=str(remote_id),
-            log_id=log.id,
-            action=action,
+        result: PublishResult = await publisher.publish(
+            article=article,
+            config=config,
+            options=options,
+            db=db,
+            target_id=target.id,
         )
+
+        # 5. 更新日志
+        if result.success:
+            log.status = PublishStatus.SUCCESS
+            log.remote_id = result.remote_id
+            await db.commit()
+
+            action = result.metadata.get("action", "created")
+            msg = "更新成功" if action == "updated" else "发布成功"
+            return PublishResponse(
+                success=True,
+                message=msg,
+                remote_id=result.remote_id,
+                log_id=log.id,
+                action=action,
+            )
+        else:
+            log.status = PublishStatus.FAILED
+            log.error_message = result.message
+            await db.commit()
+
+            return PublishResponse(
+                success=False,
+                message=result.message,
+                log_id=log.id,
+            )
 
     except Exception as e:
         # 6. 发布失败，记录错误
@@ -259,7 +343,8 @@ async def _publish_to_wordpress(
     Returns:
         (post_id, action) — action 为 "created" 或 "updated"
     """
-    config = target.config
+    # 解密敏感字段（app_password）
+    config = decrypt_config(target.type, target.config)
     required_keys = ["site_url", "username", "app_password"]
     missing = [k for k in required_keys if k not in config]
     if missing:
@@ -306,13 +391,24 @@ async def _publish_to_wordpress(
 
 
 async def _publish_to_webhook(article: Article, target: PublishTarget) -> str:
-    """发布到自定义 Webhook。"""
+    """发布到自定义 Webhook。
+
+    安全特性：
+        - 再次验证 webhook_url（防止配置被篡改或绕过验证）
+    """
     import httpx
 
-    config = target.config
+    # 解密敏感字段（headers）
+    config = decrypt_config(target.type, target.config)
     webhook_url = config.get("webhook_url")
     if not webhook_url:
         raise ValueError("Webhook 配置缺少 webhook_url")
+
+    # 验证 URL 安全性（双重保险）
+    try:
+        webhook_url = validate_webhook_url(webhook_url)
+    except URLValidationError as e:
+        raise ValueError(f"Webhook URL 不安全: {e.message}")
 
     headers = config.get("headers", {})
 
@@ -372,10 +468,11 @@ async def get_publish_logs(
             and log.remote_id
         ):
             try:
+                wc_config = decrypt_config(target.type, target.config)
                 client = WechatMpClient(
                     db=db,
-                    app_id=target.config["app_id"],
-                    app_secret=target.config["app_secret"],
+                    app_id=wc_config["app_id"],
+                    app_secret=wc_config["app_secret"],
                 )
                 status_data = await client.get_publish_status(log.remote_id)
                 wechat_status = status_data.get("publish_status", 1)

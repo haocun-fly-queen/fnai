@@ -436,6 +436,7 @@ async def search_chunks(
     query: str,
     top_k: int = 5,
     min_score: float | None = None,
+    document_ids: list[UUID] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """在指定 KB 里做语义检索（pgvector 余弦相似度）。
 
@@ -445,6 +446,7 @@ async def search_chunks(
         query: 查询文本
         top_k: 返回前 K 条
         min_score: 可选相似度阈值，只保留 score >= min_score 的
+        document_ids: 可选，只检索指定文件的 chunks（按文件选择生成）
 
     Returns:
         (items, total)；items 是 dict 列表，字段对齐 SearchResultItem。
@@ -491,9 +493,13 @@ async def search_chunks(
             DocumentChunk.knowledge_base_id == kb_id,
             Document.status == DocumentStatus.READY,
         )
-        .order_by(distance.asc())
-        .limit(top_k)
     )
+
+    # 按文件过滤（按文件选择生成：只检索指定文件的 chunks）
+    if document_ids:
+        stmt = stmt.where(DocumentChunk.document_id.in_(document_ids))
+
+    stmt = stmt.order_by(distance.asc()).limit(top_k)
     rows = (await db.execute(stmt)).all()
 
     # 4) 组装结果：score = 1 - cosine_distance（越大越相似），按需用 min_score 过滤

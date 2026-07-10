@@ -34,6 +34,8 @@ from app.schemas.article import (
     ArticleRead,
     ArticleSummary,
     ArticleUpdate,
+    BatchGenerateRequest,
+    BatchGenerateResponse,
     GenerationRequest,
     TemplateListResponse,
     TemplateSummary,
@@ -108,6 +110,8 @@ async def create_article_endpoint(
             template_code=payload.template_code,
             knowledge_base_id=payload.knowledge_base_id,
             content=payload.content,
+            source_document_ids=payload.source_document_ids,
+            scheduled_at=payload.scheduled_at,
         )
     except ArticleError as exc:
         raise _to_http(exc) from exc
@@ -295,3 +299,63 @@ async def generate_article_endpoint(
         ) from exc
 
     return ArticleRead.model_validate(article)
+
+
+# ============================================================
+# 批量生成（Phase 2）
+# ============================================================
+
+
+@router.post(
+    "/articles/batch-generate",
+    response_model=BatchGenerateResponse,
+    summary="批量生成文章（1-20 篇）",
+)
+async def batch_generate_endpoint(
+    payload: BatchGenerateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    membership: Annotated[TenantMember, Depends(require_role(Role.MEMBER))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> BatchGenerateResponse:
+    """POST /api/v1/articles/batch-generate
+
+    一次提交多篇文章的生成任务。同步创建 Article 记录，异步投递 Celery 任务。
+    前端轮询 GET /articles/{id} 查看各篇 status。
+    """
+    from app.workers.tasks import generate_article_task
+
+    article_ids: list[UUID] = []
+
+    for item in payload.items:
+        try:
+            article = await article_service.create_article(
+                db,
+                tenant_id=membership.tenant_id,
+                user_id=current_user.id,
+                title=item.title,
+                topic=item.topic,
+                template_code=item.template_code,
+                knowledge_base_id=item.knowledge_base_id,
+                content="",
+                source_document_ids=item.source_document_ids,
+            )
+        except ArticleError as exc:
+            raise _to_http(exc) from exc
+
+        article_ids.append(article.id)
+
+        # 投递 Celery 异步生成任务
+        generate_article_task.delay(
+            str(article.id),
+            str(current_user.id),
+        )
+
+    logger.info(
+        "Batch generate: tenant=%s count=%d articles=%s",
+        membership.tenant_id, len(article_ids), article_ids,
+    )
+
+    return BatchGenerateResponse(
+        article_ids=article_ids,
+        message=f"已提交 {len(article_ids)} 篇文章的生成任务",
+    )
