@@ -127,9 +127,20 @@ async def publish_to_wechat(
     await db.refresh(publish_log)
 
     # 4. 调用微信 API 发布
+    # 先解密配置。解密失败（密钥轮换/密文损坏）时给友好提示，不返回原始 CryptoError。
     try:
-        # 解密敏感字段（app_secret）
         wc_config = decrypt_config(wechat_config.type, wechat_config.config)
+    except Exception as e:
+        logger.warning("微信配置 %s 解密失败: %s", wechat_config.id, e)
+        publish_log.status = PublishStatus.FAILED
+        publish_log.error_message = "配置已失效（可能因密钥变更），请重新填写"
+        await db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail="微信配置已失效（可能因密钥变更），请重新填写 AppSecret",
+        ) from e
+
+    try:
         client = WechatMpClient(
             db=db,
             app_id=wc_config["app_id"],
@@ -265,7 +276,14 @@ async def get_publish_status(
         )
 
     try:
-        wc_config = decrypt_config(wechat_config.type, wechat_config.config)
+        try:
+            wc_config = decrypt_config(wechat_config.type, wechat_config.config)
+        except Exception as e:
+            logger.warning("微信配置 %s 解密失败: %s", wechat_config.id, e)
+            raise HTTPException(
+                status_code=400,
+                detail="微信配置已失效（可能因密钥变更），请重新填写 AppSecret",
+            ) from e
         client = WechatMpClient(
             db=db,
             app_id=wc_config["app_id"],
@@ -372,12 +390,22 @@ async def get_publish_history(
             config = c
             break
 
-    wc_config = decrypt_config(config.type, config.config)
-    client = WechatMpClient(
-        db=db,
-        app_id=wc_config["app_id"],
-        app_secret=wc_config["app_secret"],
-    )
+    # 解密配置以构建客户端。若配置缺失或解密失败（密钥轮换/密文损坏），
+    # 降级为不补全 article_url，仍返回发布历史列表，避免整个接口 500。
+    client = None
+    if config is not None:
+        try:
+            wc_config = decrypt_config(config.type, config.config)
+            client = WechatMpClient(
+                db=db,
+                app_id=wc_config["app_id"],
+                app_secret=wc_config["app_secret"],
+            )
+        except Exception as e:
+            logger.warning(
+                "微信配置 %s 解密失败，发布历史将不补全文章链接: %s",
+                test_config_id, e,
+            )
 
     # 构建响应
     items = []
@@ -388,9 +416,9 @@ async def get_publish_history(
             parts = log.remote_id.split(",", 1)
             publish_id = parts[0]
 
-        # 如果状态是成功，尝试获取文章链接
+        # 如果状态是成功，尝试获取文章链接（client 为 None 时跳过）
         article_url = None
-        if log.status == PublishStatus.SUCCESS and publish_id:
+        if client is not None and log.status == PublishStatus.SUCCESS and publish_id:
             try:
                 status_data = await client.get_publish_status(publish_id)
                 if status_data.get("publish_status") == 0 and "article_detail" in status_data:
@@ -483,7 +511,14 @@ async def mass_send_message(
     draft_media_id = parts[1]
 
     try:
-        wc_config = decrypt_config(wechat_config.type, wechat_config.config)
+        try:
+            wc_config = decrypt_config(wechat_config.type, wechat_config.config)
+        except Exception as e:
+            logger.warning("微信配置 %s 解密失败: %s", wechat_config.id, e)
+            raise HTTPException(
+                status_code=400,
+                detail="微信配置已失效（可能因密钥变更），请重新填写 AppSecret",
+            ) from e
         client = WechatMpClient(
             db=db,
             app_id=wc_config["app_id"],

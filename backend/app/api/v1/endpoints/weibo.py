@@ -100,8 +100,16 @@ async def publish_to_weibo(
             detail="未配置微博账号，请先在微博配置页面添加",
         )
 
-    # 解密敏感字段（cookie）
-    wb_config = decrypt_config(weibo_config.type, weibo_config.config)
+    # 解密敏感字段（cookie）。解密失败（密钥轮换/密文损坏）时给出友好提示，
+    # 而不是抛出原始 CryptoError 导致 500。
+    try:
+        wb_config = decrypt_config(weibo_config.type, weibo_config.config)
+    except Exception as e:
+        logger.warning("微博配置 %s 解密失败: %s", weibo_config.id, e)
+        raise HTTPException(
+            status_code=400,
+            detail="微博配置已失效（可能因密钥变更），请重新填写 Cookie",
+        ) from e
     cookie = wb_config.get("cookie", "")
     if not cookie:
         raise HTTPException(status_code=400, detail="微博 Cookie 为空，请重新配置")
@@ -320,14 +328,26 @@ async def list_weibo_configs(
 
     result_items = []
     for c in configs:
-        # 解密后再生成脱敏预览
-        decrypted = decrypt_config(c.type, c.config)
+        # 解密后再生成脱敏预览。若解密失败（密钥轮换/密文损坏），
+        # 不让整个列表接口崩溃：跳过解密、标记为需重新配置。
+        try:
+            decrypted = decrypt_config(c.type, c.config)
+            cookie_preview = mask_cookie(decrypted.get("cookie", ""))
+            default_suffix = decrypted.get("default_suffix")
+        except Exception as e:
+            logger.warning(
+                "微博配置 %s (%s) 解密失败，需重新配置: %s", c.id, c.name, e
+            )
+            cookie_preview = "⚠️ 配置已失效，请重新填写 Cookie"
+            # 尝试从原始 config 读取非敏感字段
+            default_suffix = c.config.get("default_suffix") if isinstance(c.config, dict) else None
+
         result_items.append(
             WeiboConfigResponse(
                 id=c.id,
                 name=c.name,
-                cookie_preview=mask_cookie(decrypted.get("cookie", "")),
-                default_suffix=decrypted.get("default_suffix"),
+                cookie_preview=cookie_preview,
+                default_suffix=default_suffix,
                 is_active=c.is_active,
                 created_at=c.created_at.isoformat(),
                 updated_at=c.updated_at.isoformat(),
