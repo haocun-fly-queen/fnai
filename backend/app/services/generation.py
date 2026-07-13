@@ -205,7 +205,10 @@ async def generate_article(
             cleaned = cleaned.strip()
 
         article.word_count = _count_words(cleaned)  # 在 Markdown 阶段统计，避免 HTML 标签干扰
-        article.content = md_lib.markdown(cleaned, extensions=["extra", "nl2br"])
+
+        # 转 HTML 并添加富文本样式（微信公众号、编辑器兼容）
+        html = md_lib.markdown(cleaned, extensions=["extra", "nl2br"])
+        article.content = _add_rich_text_styles(html)
         await db.commit()
 
         # 4) 全部成功
@@ -567,3 +570,176 @@ def _extract_json(text: str) -> dict[str, Any]:
             code="json_parse_failed",
             message=f"LLM 输出不是合法 JSON：{exc}；原文前 200 字：{text[:200]}",
         ) from exc
+
+
+def _add_rich_text_styles(html: str) -> str:
+    """给 HTML 添加富文本内联样式，兼容微信公众号等平台。
+
+    样式设计原则:
+    - 使用内联 style 属性（微信公众号要求）
+    - 字号、颜色、行距适合移动端阅读
+    - 避免使用 class、外部 CSS（会被过滤）
+    """
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        logger.warning("BeautifulSoup4 未安装，跳过样式增强")
+        return html
+
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # 一级标题 - 文章主标题
+    for h1 in soup.find_all('h1'):
+        h1['style'] = (
+            'font-size: 24px; '
+            'font-weight: bold; '
+            'color: #2c3e50; '
+            'line-height: 1.5; '
+            'margin: 20px 0 15px; '
+            'text-align: center;'
+        )
+
+    # 二级标题 - 章节标题
+    for h2 in soup.find_all('h2'):
+        h2['style'] = (
+            'font-size: 20px; '
+            'font-weight: bold; '
+            'color: #34495e; '
+            'line-height: 1.5; '
+            'margin: 18px 0 10px; '
+            'padding-left: 10px; '
+            'border-left: 4px solid #3498db;'
+        )
+
+    # 三级标题
+    for h3 in soup.find_all('h3'):
+        h3['style'] = (
+            'font-size: 18px; '
+            'font-weight: bold; '
+            'color: #34495e; '
+            'line-height: 1.5; '
+            'margin: 16px 0 8px;'
+        )
+
+    # 段落 - 正文主体
+    for p in soup.find_all('p'):
+        p['style'] = (
+            'font-size: 16px; '
+            'color: #3f3f3f; '
+            'line-height: 1.8; '
+            'margin: 10px 0; '
+            'text-align: justify; '
+            'word-wrap: break-word;'
+        )
+
+    # 无序列表
+    for ul in soup.find_all('ul'):
+        ul['style'] = (
+            'margin: 10px 0; '
+            'padding-left: 25px; '
+            'list-style-type: disc;'
+        )
+
+    # 有序列表
+    for ol in soup.find_all('ol'):
+        ol['style'] = (
+            'margin: 10px 0; '
+            'padding-left: 25px;'
+        )
+
+    # 列表项
+    for li in soup.find_all('li'):
+        li['style'] = (
+            'font-size: 16px; '
+            'color: #3f3f3f; '
+            'line-height: 1.75; '
+            'margin: 5px 0;'
+        )
+
+    # 粗体
+    for strong in soup.find_all('strong'):
+        strong['style'] = (
+            'font-weight: bold; '
+            'color: #2c3e50;'
+        )
+
+    # 斜体
+    for em in soup.find_all('em'):
+        em['style'] = (
+            'font-style: italic; '
+            'color: #7f8c8d;'
+        )
+
+    # 引用块
+    for blockquote in soup.find_all('blockquote'):
+        blockquote['style'] = (
+            'margin: 15px 0; '
+            'padding: 10px 15px; '
+            'border-left: 4px solid #95a5a6; '
+            'background-color: #ecf0f1; '
+            'color: #7f8c8d; '
+            'font-style: italic;'
+        )
+
+    # 代码块
+    for pre in soup.find_all('pre'):
+        pre['style'] = (
+            'background-color: #f5f5f5; '
+            'padding: 15px; '
+            'border-radius: 4px; '
+            'overflow-x: auto; '
+            'margin: 15px 0;'
+        )
+
+    # 行内代码
+    for code in soup.find_all('code'):
+        # 跳过已经在 pre 里的 code
+        if code.parent.name != 'pre':
+            code['style'] = (
+                'background-color: #f5f5f5; '
+                'padding: 2px 6px; '
+                'border-radius: 3px; '
+                'font-family: Consolas, Monaco, monospace; '
+                'font-size: 14px; '
+                'color: #e74c3c;'
+            )
+
+    # 表格
+    for table in soup.find_all('table'):
+        table['style'] = (
+            'border-collapse: collapse; '
+            'width: 100%; '
+            'margin: 15px 0;'
+        )
+
+    # 表格单元格
+    for td in soup.find_all(['td', 'th']):
+        td['style'] = (
+            'border: 1px solid #ddd; '
+            'padding: 10px; '
+            'font-size: 15px; '
+            'line-height: 1.6;'
+        )
+        if td.name == 'th':
+            td['style'] += ' background-color: #f2f2f2; font-weight: bold;'
+
+    # 链接
+    for a in soup.find_all('a'):
+        a['style'] = (
+            'color: #3498db; '
+            'text-decoration: underline;'
+        )
+
+    # 图片 - 居中显示，响应式
+    for img in soup.find_all('img'):
+        existing_style = img.get('style', '')
+        img['style'] = (
+            f'{existing_style}; '
+            'max-width: 100%; '
+            'height: auto; '
+            'display: block; '
+            'margin: 15px auto;'
+        )
+
+    return str(soup)
+

@@ -125,7 +125,8 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=False,
     )
 
-    # 正文（Markdown）
+    # 正文（富文本 HTML，带内联样式）
+    # AI 生成时从 Markdown 转换并添加样式；用户编辑时由前端富文本编辑器生成
     content: Mapped[str] = mapped_column(
         Text,
         nullable=False,
