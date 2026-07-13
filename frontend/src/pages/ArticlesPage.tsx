@@ -13,6 +13,7 @@ import {
 } from '@/lib/article-api';
 import { listKbs, listDocuments, type KnowledgeBase, type DocumentItem } from '@/lib/knowledge-api';
 import { api } from '@/lib/api';
+import { BatchPublishDialog } from '@/components/BatchPublishDialog';
 
 /** 每篇批量文章的扩展状态（含独立 KB + 文件选择） */
 interface BatchRow {
@@ -49,6 +50,28 @@ export function ArticlesPage(): JSX.Element {
     statuses: Record<string, string>;
   } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // 批量发布：选中的文章 ID + 对话框开关
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showBatchPublish, setShowBatchPublish] = useState(false);
+
+  function toggleSelect(id: string): void {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
+  function toggleSelectAll(): void {
+    setSelectedIds((prev) =>
+      prev.size === articles.length ? new Set() : new Set(articles.map((a) => a.id)),
+    );
+  }
 
   function makeEmptyRow(): BatchRow {
     return { title: '', topic: '', knowledge_base_id: '', source_document_ids: [], docs: [], docsLoading: false };
@@ -208,6 +231,11 @@ export function ArticlesPage(): JSX.Element {
     if (!confirm('确定删除这篇文章？')) return;
     try {
       await deleteArticle(id);
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       await refresh();
     } catch (e) {
       setMsg(`删除失败: ${(e as { message?: string }).message ?? e}`);
@@ -440,7 +468,7 @@ export function ArticlesPage(): JSX.Element {
         </section>
 
         {/* 右：文章列表 + 批量进度 */}
-        <section className="lg:col-span-2 rounded-lg border border-slate-200 bg-white p-4">
+        <section className="rounded-lg border border-slate-200 bg-white p-4 lg:col-span-2">
           {/* 批量进度条 */}
           {batchProgress && (
             <div className="mb-4 rounded border border-blue-200 bg-blue-50 p-3">
@@ -478,26 +506,55 @@ export function ArticlesPage(): JSX.Element {
             </div>
           )}
 
-          <h2 className="mb-3 font-medium text-slate-700">文章列表（{articles.length}）</h2>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-medium text-slate-700">文章列表（{articles.length}）</h2>
+            {articles.length > 0 && (
+              <div className="flex items-center gap-3">
+                <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-500">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.size === articles.length && articles.length > 0}
+                    onChange={toggleSelectAll}
+                  />
+                  全选
+                </label>
+                <button
+                  className="rounded bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-40"
+                  disabled={selectedIds.size === 0}
+                  onClick={() => setShowBatchPublish(true)}
+                >
+                  🚀 批量发布{selectedIds.size > 0 ? `（${selectedIds.size}）` : ''}
+                </button>
+              </div>
+            )}
+          </div>
           {articles.length === 0 ? (
             <p className="text-sm text-slate-400">还没有文章，在左侧创建第一篇吧</p>
           ) : (
             <ul className="divide-y divide-slate-100">
               {articles.map((a) => (
                 <li key={a.id} className="flex items-center justify-between py-3">
-                  <div className="min-w-0 flex-1">
-                    <button
-                      className="block truncate text-left text-sm font-medium text-slate-800 hover:text-slate-600"
-                      onClick={() => navigate(`/articles/${a.id}`)}
-                    >
-                      {a.title || '(无标题)'}
-                    </button>
-                    <div className="mt-0.5 flex items-center gap-2 text-xs text-slate-400">
-                      <span>{a.template_code}</span>
-                      <span>·</span>
-                      <span>{a.word_count} 字</span>
-                      <span>·</span>
-                      <span>{new Date(a.updated_at).toLocaleDateString('zh-CN')}</span>
+                  <div className="flex min-w-0 flex-1 items-center gap-3">
+                    <input
+                      type="checkbox"
+                      className="shrink-0"
+                      checked={selectedIds.has(a.id)}
+                      onChange={() => toggleSelect(a.id)}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <button
+                        className="block truncate text-left text-sm font-medium text-slate-800 hover:text-slate-600"
+                        onClick={() => navigate(`/articles/${a.id}`)}
+                      >
+                        {a.title || '(无标题)'}
+                      </button>
+                      <div className="mt-0.5 flex items-center gap-2 text-xs text-slate-400">
+                        <span>{a.template_code}</span>
+                        <span>·</span>
+                        <span>{a.word_count} 字</span>
+                        <span>·</span>
+                        <span>{new Date(a.updated_at).toLocaleDateString('zh-CN')}</span>
+                      </div>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -515,6 +572,17 @@ export function ArticlesPage(): JSX.Element {
           )}
         </section>
       </div>
+
+      {showBatchPublish && (
+        <BatchPublishDialog
+          articleIds={Array.from(selectedIds)}
+          onClose={() => setShowBatchPublish(false)}
+          onSuccess={(message) => {
+            setMsg(`✅ ${message}`);
+            setSelectedIds(new Set());
+          }}
+        />
+      )}
     </div>
   );
 }

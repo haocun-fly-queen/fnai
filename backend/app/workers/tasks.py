@@ -379,3 +379,154 @@ async def _publish_scheduled_async() -> dict:
         await db.commit()
 
     return stats
+
+
+@shared_task(
+    name="app.workers.tasks.batch_publish_task",
+    bind=True,
+    max_retries=0,
+)
+def batch_publish_task(
+    self,
+    article_id: str,
+    target_id: str,
+    status: str = "draft",
+    user_id: str | None = None,
+) -> dict:
+    """后台把一篇文章发布到一个目标。
+
+    由 batch-publish 端点为每个 (文章, 目标) 组合投递一个任务，
+    串行执行（worker prefetch=1）避免平台限流。
+
+    发布结果落 PublishLog，调用方轮询 GET /articles/{id}/publish-logs 查看。
+
+    Args:
+        article_id: 文章 UUID（字符串）
+        target_id: 发布目标 UUID（字符串）
+        status: WordPress status（draft / publish），其他平台忽略
+        user_id: 操作人 UUID（字符串），可选
+
+    Returns:
+        {"article_id", "target_id", "status": "success"/"failed"/"skipped", ...}
+    """
+    logger.info(
+        "batch_publish_task start: article=%s target=%s", article_id, target_id
+    )
+    try:
+        result = asyncio.run(
+            _batch_publish_async(
+                UUID(article_id),
+                UUID(target_id),
+                status,
+                UUID(user_id) if user_id else None,
+            )
+        )
+        logger.info(
+            "batch_publish_task done: article=%s target=%s status=%s",
+            article_id, target_id, result.get("status"),
+        )
+        return result
+    except Exception as exc:
+        logger.exception(
+            "batch_publish_task 失败: article=%s target=%s", article_id, target_id
+        )
+        return {
+            "article_id": article_id,
+            "target_id": target_id,
+            "status": "failed",
+            "error": str(exc),
+        }
+
+
+async def _batch_publish_async(
+    article_uuid: UUID,
+    target_uuid: UUID,
+    status: str,
+    user_uuid: UUID | None,
+) -> dict:
+    """异步执行单篇单目标发布（在 asyncio.run 里调用）。"""
+    from app.core.config_crypto import decrypt_config
+    from app.db.session import session_scope
+    from app.models import Article
+    from app.models.publish_log import PublishLog, PublishStatus
+    from app.models.publish_target import PublishTarget
+    from app.services.publishers import PublishResult, get_publisher
+
+    async with session_scope() as db:
+        article = await db.get(Article, article_uuid)
+        if article is None or not article.content:
+            logger.warning(
+                "_batch_publish_async: 文章不存在或内容为空 id=%s", article_uuid
+            )
+            return {
+                "article_id": str(article_uuid),
+                "target_id": str(target_uuid),
+                "status": "skipped",
+                "reason": "article_missing_or_empty",
+            }
+
+        target = await db.get(PublishTarget, target_uuid)
+        # 校验目标存在、租户一致、且已启用（跨租户发布是越权，必须拦截）
+        if (
+            target is None
+            or target.tenant_id != article.tenant_id
+            or not target.is_active
+        ):
+            logger.warning(
+                "_batch_publish_async: 目标无效/禁用/跨租户 target=%s article=%s",
+                target_uuid, article_uuid,
+            )
+            return {
+                "article_id": str(article_uuid),
+                "target_id": str(target_uuid),
+                "status": "skipped",
+                "reason": "target_invalid_or_inactive",
+            }
+
+        # 创建发布日志（初始 pending）
+        log = PublishLog(
+            article_id=article_uuid,
+            target_id=target_uuid,
+            status=PublishStatus.PENDING,
+            created_by=user_uuid,
+        )
+        db.add(log)
+        await db.flush()
+
+        try:
+            publisher = get_publisher(target.type)
+            config = decrypt_config(target.type, target.config)
+            result: PublishResult = await publisher.publish(
+                article=article,
+                config=config,
+                options={"status": status},
+                db=db,
+                target_id=target.id,
+            )
+
+            if result.success:
+                log.status = PublishStatus.SUCCESS
+                log.remote_id = result.remote_id
+                article.is_published = True
+                await db.commit()
+                return {
+                    "article_id": str(article_uuid),
+                    "target_id": str(target_uuid),
+                    "status": "success",
+                    "remote_id": result.remote_id,
+                }
+            else:
+                log.status = PublishStatus.FAILED
+                log.error_message = (result.message or "")[:2000]
+                await db.commit()
+                return {
+                    "article_id": str(article_uuid),
+                    "target_id": str(target_uuid),
+                    "status": "failed",
+                    "error": result.message,
+                }
+        except Exception as e:
+            log.status = PublishStatus.FAILED
+            log.error_message = str(e)[:2000]
+            await db.commit()
+            raise

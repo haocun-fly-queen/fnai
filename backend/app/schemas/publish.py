@@ -79,6 +79,33 @@ class PublishResponse(BaseModel):
     action: str | None = Field(None, description="操作类型：created（新建）/ updated（更新）")
 
 
+# === 批量发布 ===
+
+
+class BatchPublishRequest(BaseModel):
+    """POST /articles/batch-publish 的请求体。
+
+    一次把多篇文章发布到多个目标。后端为每个 (文章, 目标) 组合
+    异步投递一个 Celery 任务，前端轮询 publish-logs 查看各自状态。
+    """
+
+    article_ids: list[UUID] = Field(
+        min_length=1, max_length=50, description="待发布的文章 ID 列表（1-50 篇）"
+    )
+    target_ids: list[UUID] = Field(
+        min_length=1, max_length=20, description="发布目标 ID 列表（1-20 个）"
+    )
+    status: str = Field(default="draft", description="WordPress status: draft / publish")
+
+
+class BatchPublishResponse(BaseModel):
+    """POST /articles/batch-publish 的响应。"""
+
+    task_count: int = Field(description="已投递的发布任务数（文章数 × 目标数）")
+    article_ids: list[UUID] = Field(description="参与批量发布的文章 ID 列表")
+    message: str = Field(default="批量发布任务已提交，请轮询各文章发布历史")
+
+
 # === 发布日志查询 ===
 
 

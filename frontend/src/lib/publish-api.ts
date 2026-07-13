@@ -235,6 +235,38 @@ export async function publishArticle(articleId: string, data: PublishRequest): P
   return res.json();
 }
 
+export interface BatchPublishRequest {
+  article_ids: string[];
+  target_ids: string[];
+  status?: string; // WordPress: draft / publish
+}
+
+export interface BatchPublishResponse {
+  task_count: number;
+  article_ids: string[];
+  message: string;
+}
+
+export async function batchPublish(data: BatchPublishRequest): Promise<BatchPublishResponse> {
+  const token = getAccessToken();
+
+  const res = await fetch(`${API_BASE}/articles/batch-publish`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(data),
+  });
+
+  if (!res.ok) {
+    const err: ApiError = await res.json();
+    throw new Error(err.message || '批量发布失败');
+  }
+
+  return res.json();
+}
+
 export async function getPublishLogs(articleId: string): Promise<PublishLog[]> {
   const token = getAccessToken();
   // Token 已由 getAccessToken() 校验

@@ -28,6 +28,8 @@ from app.models.publish_log import PublishLog, PublishStatus
 from app.models.publish_target import PublishTarget, PublishTargetType
 from app.models.user import User
 from app.schemas.publish import (
+    BatchPublishRequest,
+    BatchPublishResponse,
     PublishLogResponse,
     PublishLogSimpleResponse,
     PublishRequest,
@@ -330,6 +332,82 @@ async def publish_article(
             message=f"发布失败: {str(e)}",
             log_id=log.id,
         )
+
+
+@router.post("/articles/batch-publish", response_model=BatchPublishResponse)
+async def batch_publish_articles(
+    data: BatchPublishRequest,
+    db: AsyncSession = Depends(get_db),
+    tenant_id: UUID = Depends(get_active_tenant_id),
+    current_user: User = Depends(get_current_user),
+) -> BatchPublishResponse:
+    """批量发布：把多篇文章发布到多个目标。
+
+    同步校验文章/目标归属当前租户，然后为每个 (文章, 目标) 组合
+    异步投递一个 Celery 任务。前端轮询各文章的 publish-logs 查看状态。
+    """
+    from app.workers.tasks import batch_publish_task
+
+    # 1. 校验文章：全部属于当前租户
+    article_stmt = select(Article.id).where(
+        Article.id.in_(data.article_ids),
+        Article.tenant_id == tenant_id,
+    )
+    result = await db.execute(article_stmt)
+    valid_article_ids = set(result.scalars().all())
+
+    missing_articles = set(data.article_ids) - valid_article_ids
+    if missing_articles:
+        raise HTTPException(
+            status_code=404,
+            detail=f"文章不存在或无权访问: {', '.join(str(a) for a in missing_articles)}",
+        )
+
+    # 2. 校验目标：全部属于当前租户且已启用
+    target_stmt = select(PublishTarget).where(
+        PublishTarget.id.in_(data.target_ids),
+        PublishTarget.tenant_id == tenant_id,
+    )
+    result = await db.execute(target_stmt)
+    targets = result.scalars().all()
+    valid_target_ids = {t.id for t in targets}
+
+    missing_targets = set(data.target_ids) - valid_target_ids
+    if missing_targets:
+        raise HTTPException(
+            status_code=404,
+            detail=f"发布目标不存在或无权访问: {', '.join(str(t) for t in missing_targets)}",
+        )
+
+    inactive = [t.name for t in targets if not t.is_active]
+    if inactive:
+        raise HTTPException(
+            status_code=400,
+            detail=f"发布目标已禁用: {', '.join(inactive)}",
+        )
+
+    # 3. 为每个 (文章, 目标) 组合投递异步任务
+    task_count = 0
+    for article_id in data.article_ids:
+        for target_id in data.target_ids:
+            batch_publish_task.delay(
+                str(article_id),
+                str(target_id),
+                data.status,
+                str(current_user.id),
+            )
+            task_count += 1
+
+    logger.info(
+        "Batch publish: tenant=%s articles=%d targets=%d tasks=%d",
+        tenant_id, len(data.article_ids), len(data.target_ids), task_count,
+    )
+
+    return BatchPublishResponse(
+        task_count=task_count,
+        article_ids=list(data.article_ids),
+        message=f"已提交 {task_count} 个发布任务（{len(data.article_ids)} 篇 × {len(data.target_ids)} 个目标）",
+    )
 
 
 async def _publish_to_wordpress(
