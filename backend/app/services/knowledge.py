@@ -4,7 +4,10 @@
     - KB 增删改查
     - Document 上传（落盘 + 写 DB，status=PENDING）
     - Document 列表/详情/删除（同步删文件）
-    - 异步处理（Celery 解析/embedding）Step 3 再加
+
+✅ Step 3 实现（2026-06-26）：
+    - 上传完成后 process_document.delay(doc_id) 触发 Celery 异步处理
+      （解析 → 切分 → embedding → 写 chunks → status=READY/FAILED）
 
 给 Java 同事的提示：
 - Python service 用"模块级函数"而不是 class，因为无状态
@@ -14,6 +17,8 @@
 
 from typing import Any
 from uuid import UUID, uuid4
+
+import asyncio
 
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
@@ -221,8 +226,8 @@ async def upload_document(
 ) -> Document:
     """上传文档（落盘 + 写 DB，status=PENDING）。
 
-    ⚠️ 还没接 Celery 异步处理，文档会卡在 PENDING 状态
-    Step 3 会加 process_document.delay(doc_id) 触发处理
+    ✅ Step 3：落盘成功后 process_document.delay(doc_id) 触发异步处理，
+       文档状态会由 worker 推进 PENDING → PROCESSING → READY/FAILED。
 
     Args:
         db: 异步 session
@@ -298,6 +303,22 @@ async def upload_document(
         raise KnowledgeError(
             code="storage_write_failed",
             message=f"文件写入失败: {exc}",
+        )
+
+    # 6) 触发 Celery 异步处理（解析 → 切分 → embedding → 写 chunks）
+    #    ⚠️ 用 .delay() 投递到队列后立即返回，不阻塞 HTTP 响应。
+    #    worker 没起时任务会堆在 Redis 队列里，等 worker 起来再消费（不会丢）。
+    #    投递失败（如 Redis 挂了）不影响上传本身——文档已落盘，可重新触发。
+    try:
+        # 延迟 import：避免 FastAPI 启动时强依赖 celery 配置
+        from app.workers.tasks import process_document
+
+        process_document.delay(str(doc_id))
+    except Exception as exc:
+        # 投递失败只记日志，不让上传失败（文档已在 DB+磁盘，可后续重处理）
+        logger.warning(
+            "process_document 投递失败（文档已上传，可稍后重试）: id=%s err=%s",
+            doc_id, exc,
         )
 
     logger.info(
@@ -400,3 +421,108 @@ async def delete_document(
     # 3) 删文件
     storage.delete(storage_key)
     logger.info("Document deleted: id=%s", doc_id)
+
+
+# ============================================================
+# 4️⃣ 语义检索（Step 4）
+# ============================================================
+
+
+async def search_chunks(
+    db: AsyncSession,
+    *,
+    tenant_id: UUID,
+    kb_id: UUID,
+    query: str,
+    top_k: int = 5,
+    min_score: float | None = None,
+    document_ids: list[UUID] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """在指定 KB 里做语义检索（pgvector 余弦相似度）。
+
+    流程：校验 KB → query 向量化 → cosine_distance 排序取 Top-K → 组装来源信息。
+
+    Args:
+        query: 查询文本
+        top_k: 返回前 K 条
+        min_score: 可选相似度阈值，只保留 score >= min_score 的
+        document_ids: 可选，只检索指定文件的 chunks（按文件选择生成）
+
+    Returns:
+        (items, total)；items 是 dict 列表，字段对齐 SearchResultItem。
+
+    Raises:
+        KnowledgeError(code="not_found"): KB 不存在/不属于该租户
+        KnowledgeError(code="embedding_failed"): 查询向量化失败
+    """
+    # 1) 校验 KB 存在且属于该租户（复用 get_kb，跨租户直接 404）
+    await get_kb(db, tenant_id=tenant_id, kb_id=kb_id)
+
+    # 2) 把 query 向量化
+    #    embedding.embed_texts 是同步函数（给 Celery worker 用，内部走 openai 同步客户端）。
+    #    在 async 事件循环里直接调会阻塞，所以丢到线程池跑。
+    #    延迟 import：避免模块级就加载 openai 客户端。
+    from app.services import embedding
+
+    try:
+        vectors = await asyncio.to_thread(embedding.embed_texts, [query])
+    except embedding.EmbeddingError as exc:
+        raise KnowledgeError(
+            code="embedding_failed",
+            message=f"查询向量化失败: {exc.message}",
+        ) from exc
+    query_vec = vectors[0]
+
+    # 3) 向量检索：cosine_distance 升序（距离越小越相似），join 文档拿 filename
+    #    只检索 READY 文档的 chunk —— PENDING/FAILED 的内容不可信，不参与召回。
+    distance = DocumentChunk.embedding.cosine_distance(query_vec)
+    stmt = (
+        select(
+            DocumentChunk.id,
+            DocumentChunk.document_id,
+            DocumentChunk.chunk_index,
+            DocumentChunk.char_start,
+            DocumentChunk.char_end,
+            DocumentChunk.content,
+            Document.filename,
+            distance.label("distance"),
+        )
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(
+            DocumentChunk.tenant_id == tenant_id,
+            DocumentChunk.knowledge_base_id == kb_id,
+            Document.status == DocumentStatus.READY,
+        )
+    )
+
+    # 按文件过滤（按文件选择生成：只检索指定文件的 chunks）
+    if document_ids:
+        stmt = stmt.where(DocumentChunk.document_id.in_(document_ids))
+
+    stmt = stmt.order_by(distance.asc()).limit(top_k)
+    rows = (await db.execute(stmt)).all()
+
+    # 4) 组装结果：score = 1 - cosine_distance（越大越相似），按需用 min_score 过滤
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        score = 1.0 - float(row.distance)
+        if min_score is not None and score < min_score:
+            continue
+        items.append(
+            {
+                "chunk_id": row.id,
+                "document_id": row.document_id,
+                "filename": row.filename,
+                "chunk_index": row.chunk_index,
+                "char_start": row.char_start,
+                "char_end": row.char_end,
+                "content": row.content,
+                "score": score,
+            }
+        )
+
+    logger.info(
+        "search done: kb=%s top_k=%d hits=%d min_score=%s",
+        kb_id, top_k, len(items), min_score,
+    )
+    return items, len(items)

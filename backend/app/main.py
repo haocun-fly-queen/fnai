@@ -3,7 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import sentry_sdk
+# import sentry_sdk  # 临时禁用 - 网络问题无法安装
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -22,8 +22,8 @@ from app.services import storage
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Application startup / shutdown hooks."""
     setup_logging()
-    if settings.sentry_dsn:
-        sentry_sdk.init(dsn=settings.sentry_dsn, environment=settings.environment)
+    # if settings.sentry_dsn:  # 临时禁用 Sentry
+    #     sentry_sdk.init(dsn=settings.sentry_dsn, environment=settings.environment)
     logger.info("app.startup", env=settings.environment, version=settings.app_version)
 
     # 确保本地落盘根目录存在

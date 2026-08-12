@@ -1,6 +1,6 @@
-"""Knowledge base HTTP 端点（Step 2 实现，2026-06-25）。
+"""Knowledge base HTTP 端点（Step 2 + Step 4）。
 
-8 个端点：
+9 个端点：
 
     POST   /knowledge                          创建 KB（MEMBER+）
     GET    /knowledge                          列 KB（任何成员）
@@ -11,6 +11,8 @@
     GET    /knowledge/{kb_id}/documents        列文档（任何成员）
     GET    /knowledge/{kb_id}/documents/{id}   文档详情（任何成员）
     DELETE /knowledge/{kb_id}/documents/{id}   删文档（MEMBER+）
+
+    POST   /knowledge/{kb_id}/search           语义检索（任何成员，Step 4）
 
 ⚠️ 设计：
 - 端点"瘦"：接参 → 调 service → 翻译 KnowledgeError → HTTPException
@@ -42,6 +44,9 @@ from app.schemas.knowledge import (
     KnowledgeBaseCreate,
     KnowledgeBaseListResponse,
     KnowledgeBaseRead,
+    SearchRequest,
+    SearchResponse,
+    SearchResultItem,
 )
 from app.services import knowledge as knowledge_service
 from app.services.knowledge import KnowledgeError
@@ -96,6 +101,13 @@ def _knowledge_error_to_http(err: KnowledgeError) -> HTTPException:
     if code == "storage_write_failed":
         return HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"code": code, "message": err.message},
+        )
+
+    # 503 上游 embedding 服务失败（检索时 query 向量化挂了）
+    if code == "embedding_failed":
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"code": code, "message": err.message},
         )
 
@@ -352,3 +364,44 @@ async def delete_document(
         )
     except KnowledgeError as exc:
         raise _knowledge_error_to_http(exc) from exc
+
+
+# ============================================================
+# Search 端点（Step 4）
+# ============================================================
+
+
+@router.post(
+    "/{kb_id}/search",
+    response_model=SearchResponse,
+    summary="语义检索（任何成员）：把 query 向量化，返回最相似的 chunks + 来源",
+)
+async def search_kb(
+    kb_id: UUID,
+    payload: SearchRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    membership: Annotated[TenantMember, Depends(require_role(Role.VIEWER))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SearchResponse:
+    """POST /api/v1/knowledge/{kb_id}/search
+
+    在该 KB 的文档 chunk 里做余弦相似度检索，返回 Top-K 命中（带文档来源 + 分数）。
+    权限：任何成员（VIEWER 也能检索）。
+    """
+    try:
+        items, total = await knowledge_service.search_chunks(
+            db,
+            tenant_id=membership.tenant_id,
+            kb_id=kb_id,
+            query=payload.query,
+            top_k=payload.top_k,
+            min_score=payload.min_score,
+        )
+    except KnowledgeError as exc:
+        raise _knowledge_error_to_http(exc) from exc
+
+    return SearchResponse(
+        query=payload.query,
+        items=[SearchResultItem(**item) for item in items],
+        total=total,
+    )

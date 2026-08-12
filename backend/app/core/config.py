@@ -46,8 +46,15 @@ class Settings(BaseSettings):
     # ----- Auth -----
     jwt_secret: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 15
-    refresh_token_expire_days: int = 7
+    access_token_expire_minutes: int = 60    # 改为60分钟（1小时）
+    refresh_token_expire_days: int = 30      # 改为30天
+
+    # ----- Encryption（敏感数据加密）-----
+    # Fernet 密钥，用于加密发布目标配置中的 app_secret / app_password / cookie 等
+    # 生成：python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # 支持逗号分隔多个密钥以实现密钥轮换（第一个用于加密，全部用于解密）
+    # 生产环境必须配置，否则启动报错
+    encryption_key: str = ""
 
     # ----- AI -----
     openai_api_key: str = ""
